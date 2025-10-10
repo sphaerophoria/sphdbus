@@ -1,0 +1,16 @@
+.{
+    .name = .sphtud,
+    .version = "0.0.1",
+    .paths = .{
+        "main.zig",
+        "build.zig",
+        "build.zig.zon",
+    },
+    .dependencies = .{
+        .sphtud = .{
+            .path = "sphtud",
+        },
+    },
+    .fingerprint = 0x705b0991ed9bf14b,
+
+}

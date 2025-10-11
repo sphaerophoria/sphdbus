@@ -1,4 +1,5 @@
 const std = @import("std");
+const sphtud = @import("sphtud");
 const builtin = @import("builtin");
 
 fn extractUnixPathFromAddress(address: []const u8) ![]const u8 {
@@ -50,28 +51,28 @@ const HeaderField = enum(u8) {
 };
 
 
-const DbusWriter = struct {
+const DbusMessageWriter = struct {
     pos: u32,
     writer: *std.Io.Writer,
 
-    fn writeByte(self: *DbusWriter, b: u8) !void {
+    fn writeByte(self: *DbusMessageWriter, b: u8) !void {
         try self.writer.writeByte(b);
         self.pos += 1;
     }
 
-    fn writeU32(self: *DbusWriter, val: u32) !void {
+    fn writeU32(self: *DbusMessageWriter, val: u32) !void {
         try self.alignForwards(4);
         try self.writer.writeInt(u32, val, builtin.cpu.arch.endian());
         self.pos += 4;
     }
 
-    fn writeAll(self: *DbusWriter, data: []const u8) !void {
+    fn writeAll(self: *DbusMessageWriter, data: []const u8) !void {
         const len_u32 = std.math.cast(u32, data.len) orelse return error.InvalidLen;
         try self.writer.writeAll(data);
         self.pos += len_u32;
     }
 
-    fn writeVariantTag(self: *DbusWriter, tag: []const u8) !void {
+    fn writeVariantTag(self: *DbusMessageWriter, tag: []const u8) !void {
         const tag_len_u8 = std.math.cast(u8, tag.len) orelse return error.InvalidLen;
         try self.writer.writeByte(tag_len_u8);
         self.pos += 1;
@@ -80,7 +81,7 @@ const DbusWriter = struct {
         self.pos += tag_len_u8;
     }
 
-    fn writeStringLike(self: *DbusWriter, s: []const u8) !void {
+    fn writeStringLike(self: *DbusMessageWriter, s: []const u8) !void {
         const s_len_u32 = std.math.cast(u32, s.len) orelse return error.InvalidLen;
         try self.writeU32(s_len_u32);
 
@@ -91,44 +92,44 @@ const DbusWriter = struct {
         self.pos += 1;
     }
 
-    fn alignForwards(self: *DbusWriter, alignment: u32) !void {
+    fn alignForwards(self: *DbusMessageWriter, alignment: u32) !void {
         const new_pos = std.mem.alignForward(u32, self.pos, alignment);
         try self.writer.splatByteAll(0, new_pos - self.pos);
         self.pos = new_pos;
     }
 };
 
-const DbusReader = struct {
+const DbusMessageReader = struct {
     pos: u32,
     reader: *std.Io.Reader,
 
-    fn readByte(self: *DbusReader) !u8 {
+    fn readByte(self: *DbusMessageReader) !u8 {
         const ret = try self.reader.takeByte();
         self.pos += 1;
         return ret;
     }
 
-    fn readBytes(self: *DbusReader, n: u32) ![]const u8 {
+    fn readBytes(self: *DbusMessageReader, n: u32) ![]const u8 {
         const ret = try self.reader.take(n);
         self.pos += n;
         return ret;
     }
 
-    fn readU32(self: *DbusReader, endianness: DbusEndianness) !u32 {
+    fn readU32(self: *DbusMessageReader, endianness: DbusEndianness) !u32 {
         try self.alignForwards(4);
         const ret = try self.reader.takeInt(u32, endianness.toBuiltin());
         self.pos += 4;
         return ret;
     }
 
-    fn alignForwards(self: *DbusReader, alignment: u32) !void {
+    fn alignForwards(self: *DbusMessageReader, alignment: u32) !void {
         const new_pos = std.mem.alignForward(u32, self.pos, alignment);
         try self.reader.discardAll(new_pos - self.pos);
         self.pos = new_pos;
     }
 };
 
-fn serializeHelloMsg(w: *DbusWriter) !void {
+fn serializeHelloMsg(w: *DbusMessageWriter) !void {
     try w.writeByte(@intFromEnum(DbusEndianness.little));
     try w.writeByte(@intFromEnum(MsgType.call));
     try w.writeByte(0); // flags
@@ -139,7 +140,7 @@ fn serializeHelloMsg(w: *DbusWriter) !void {
 
     var header_buf: [4096]u8 = undefined;
     var header_field_io = std.Io.Writer.fixed(&header_buf);
-    var header_field_writer = DbusWriter {
+    var header_field_writer = DbusMessageWriter {
         .pos = w.pos + 4,
         .writer = &header_field_io,
     };
@@ -212,7 +213,7 @@ const HeaderFieldKV = struct {
     val: DbusVal,
 };
 
-const Header = struct {
+const Message = struct {
     endianness: DbusEndianness,
     message_type: MsgType,
     flags: u8,
@@ -222,12 +223,12 @@ const Header = struct {
     header_fields: []HeaderFieldKV,
     body: DbusVal,
 
-    fn parse(alloc: std.mem.Allocator, io_reader: *std.Io.Reader) !Header {
-        var dbus_reader = DbusReader {
+    fn parse(alloc: std.mem.Allocator, io_reader: *std.Io.Reader) !Message {
+        var dbus_reader = DbusMessageReader {
             .pos = 0,
             .reader = io_reader,
         };
-        // peekUntilFromPos
+
         const endianness = try std.meta.intToEnum(DbusEndianness, try dbus_reader.readByte());
         const message_type = try std.meta.intToEnum(MsgType, try dbus_reader.readByte());
         const flags = try dbus_reader.readByte();
@@ -331,7 +332,7 @@ const Header = struct {
 
     }
 
-    pub fn format(self: Header, w: *std.Io.Writer) !void {
+    pub fn format(self: Message, w: *std.Io.Writer) !void {
         try w.print("endianness: {}\n" ,.{self.endianness});
         try w.print("message_type: {}\n" ,.{self.message_type});
         try w.print("flags: {}\n" ,.{self.flags});
@@ -347,49 +348,230 @@ const Header = struct {
     }
 };
 
+pub const DbusConnectionInitializer = struct {
+    state: enum {
+        wait_for_ok,
+        wait_for_ack,
+        complete,
+    },
+    writer: *std.net.Stream.Writer,
+    reader: *std.net.Stream.Reader,
+    on_init: *DbusConnection,
+
+
+    pub fn init(reader: *std.net.Stream.Reader, writer: *std.net.Stream.Writer, on_init: *DbusConnection) !DbusConnectionInitializer {
+        try sphtud.event.setNonblock(reader.getStream().handle);
+
+        const io_writer = &writer.interface;
+        try io_writer.writeByte(0);
+        try io_writer.print("AUTH EXTERNAL 31303031\r\n", .{});
+        try io_writer.flush();
+
+        return .{
+            .state = .wait_for_ok,
+            .writer = writer,
+            .reader = reader,
+            .on_init = on_init,
+        };
+    }
+
+
+    pub fn handler(self: *DbusConnectionInitializer) sphtud.event.LoopLinear.Handler {
+        return .{
+            .fd = self.reader.getStream().handle,
+            .ptr = self,
+            .vtable = &.{
+                .poll = poll,
+                .close = close,
+            },
+            .desired_events = .{
+                .read = true,
+                .write = false,
+            },
+        };
+    }
+
+    fn poll(ctx: ?*anyopaque, _: *sphtud.event.LoopLinear, _: sphtud.event.PollReason) sphtud.event.LoopLinear.PollResult {
+        const self: *DbusConnectionInitializer = @ptrCast(@alignCast(ctx));
+        self.pollError() catch |e| {
+            if (e == error.ReadFailed) {
+                if (self.reader.getError()) |reader_err| {
+                    if (reader_err == error.WouldBlock) {
+                        return .in_progress;
+                    }
+                }
+            }
+
+            std.log.err("connection init failed, closing: {t}", .{e});
+            return .complete;
+        };
+
+        std.debug.assert(self.state == .complete);
+        return .{
+            .replace_handler = self.on_init.handler(),
+        };
+    }
+
+    fn pollError(self: *DbusConnectionInitializer) !void {
+        const io_reader: *std.Io.Reader = self.reader.interface();
+        const io_writer = &self.writer.interface;
+        sw: switch (self.state) {
+            .wait_for_ok => {
+                try waitForStartsWith(io_reader, "OK", error.NotOk);
+
+                try io_writer.print("NEGOTIATE_UNIX_FD\r\n", .{});
+                try io_writer.flush();
+
+                self.state = .wait_for_ack;
+                continue :sw self.state;
+            },
+            .wait_for_ack => {
+                try waitForStartsWith(io_reader, "AGREE_UNIX_FD", error.NoUnixFd);
+                try io_writer.print("BEGIN\r\n", .{});
+                try io_writer.flush();
+
+                self.state = .complete;
+                continue :sw self.state;
+            },
+            .complete => {
+                var test_dbus_writer = DbusMessageWriter {
+                    .pos = 0,
+                    .writer = io_writer,
+                };
+
+                try serializeHelloMsg(&test_dbus_writer);
+                try io_writer.flush();
+            },
+
+        }
+
+    }
+
+    fn close(ctx: ?*anyopaque) void {
+        const self: *DbusConnectionInitializer = @ptrCast(@alignCast(ctx));
+        switch (self.state) {
+            .complete => return,
+            else => {},
+
+        }
+        self.reader.getStream().close();
+    }
+};
+
+pub const DbusConnection = struct {
+    scratch: sphtud.alloc.LinearAllocator,
+    reader: *std.net.Stream.Reader,
+
+    pub fn handler(self: *DbusConnection) sphtud.event.LoopLinear.Handler {
+        return .{
+            .fd = self.reader.getStream().handle,
+            .ptr = self,
+            .vtable = &.{
+                .poll = poll,
+                .close = close,
+            },
+            .desired_events = .{
+                .read = true,
+                .write = false,
+            },
+        };
+    }
+
+    fn poll(ctx: ?*anyopaque, _: *sphtud.event.LoopLinear, _: sphtud.event.PollReason) sphtud.event.LoopLinear.PollResult {
+        const self: *DbusConnection = @ptrCast(@alignCast(ctx));
+        self.pollError() catch |e| switch (e) {
+            error.ReadFailed => {
+                if (self.reader.getError()) |reader_err| switch (reader_err) {
+                    error.WouldBlock => {
+                        std.log.debug("wait time", .{});
+                        return .in_progress;
+                    },
+                    else => {
+                        std.log.err("read failed, closing connection: {t}", .{reader_err});
+                        return .complete;
+
+                    },
+                };
+            },
+            else => {
+                std.log.err("Closing connection: {t}", .{e});
+                return .complete;
+            },
+        };
+
+        return .in_progress;
+    }
+
+    fn pollError(self: *DbusConnection) !void {
+        const io_reader: *std.Io.Reader = self.reader.interface();
+
+
+        while (true) {
+            // It's easier to parse from a buffer than it is to write
+            // Message.parse in a way where it doesn't consume bytes from
+            // the reader for a partial read. Fill in outer loop as much as
+            // possible, then if the parse fails below because there wasn't
+            // enough data, we can just fill again until we return WouldBlock
+            // here
+            try io_reader.fillMore();
+
+            while (true) {
+                const cp = self.scratch.checkpoint();
+                defer self.scratch.restore(cp);
+
+                var tmp_reader = std.Io.Reader.fixed(io_reader.buffered());
+
+                const header = Message.parse(self.scratch.allocator(), &tmp_reader) catch |e| switch (e) {
+                    error.EndOfStream => break,
+                    else => return e,
+                };
+                std.debug.print("{f}\n", .{header});
+
+                io_reader.toss(tmp_reader.seek);
+            }
+        }
+    }
+
+    fn close(ctx: ?*anyopaque) void {
+        const self: *DbusConnection = @ptrCast(@alignCast(ctx));
+        self.reader.getStream().close();
+    }
+
+};
 
 pub fn main() !void {
+    var alloc_buf: [1 * 1024 * 1024]u8 = undefined;
+    var alloc = sphtud.alloc.BufAllocator.init(&alloc_buf);
+    const scratch = alloc.backLinear();
+
     const session_address = std.posix.getenv("DBUS_SESSION_BUS_ADDRESS") orelse return error.NoSessionAddress;
     const socket_path = try extractUnixPathFromAddress(session_address);
 
     const socket = try std.net.connectUnixSocket(socket_path);
+
     var reader_buf: [4096]u8 = undefined;
     var reader = socket.reader(&reader_buf);
 
     var writer_buf: [4096]u8 = undefined;
     var writer = socket.writer(&writer_buf);
-    var io_writer = &writer.interface;
 
-    try io_writer.writeByte(0);
-    try io_writer.print("AUTH EXTERNAL 31303031\r\n", .{});
-    try io_writer.flush();
-
-    const io_reader: *std.Io.Reader = reader.interface();
-    try waitForStartsWith(io_reader, "OK", error.NotOk);
-
-    try io_writer.print("NEGOTIATE_UNIX_FD\r\n", .{});
-    try io_writer.flush();
-    try waitForStartsWith(io_reader, "AGREE_UNIX_FD", error.NoUnixFd);
-
-    try io_writer.print("BEGIN\r\n", .{});
-    try io_writer.flush();
-
-    //var test_buf: [4096]u8 = undefined;
-    //var test_buf_io = std.Io.Writer.fixed(&test_buf);
-    var test_dbus_writer = DbusWriter {
-        .pos = 0,
-        .writer = io_writer,
+    var connection = DbusConnection {
+        .scratch = scratch,
+        .reader = &reader,
     };
+    var initializer = try DbusConnectionInitializer.init(&reader, &writer, &connection);
 
-    try serializeHelloMsg(&test_dbus_writer);
-    try io_writer.flush();
+    var loop = try sphtud.event.LoopLinear.init(
+        alloc.allocator(),
+        alloc.allocator(),
+        // FIXME limits go here
+    );
+    try loop.register(initializer.handler());
 
-    var alloc_buf: [1 * 1024 * 1024]u8 = undefined;
-    var alloc = std.heap.FixedBufferAllocator.init(&alloc_buf);
-
+    const cp = scratch.checkpoint();
     while (true) {
-        const header = try Header.parse(alloc.allocator(), io_reader);
-        std.debug.print("{f}\n", .{header});
+        scratch.restore(cp);
+        try loop.wait(scratch);
     }
 }
 

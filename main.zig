@@ -354,67 +354,19 @@ pub const DbusConnectionInitializer = struct {
         wait_for_ack,
         complete,
     },
-    writer: *std.net.Stream.Writer,
-    reader: *std.net.Stream.Reader,
-    on_init: *DbusConnection,
 
-
-    pub fn init(reader: *std.net.Stream.Reader, writer: *std.net.Stream.Writer, on_init: *DbusConnection) !DbusConnectionInitializer {
-        try sphtud.event.setNonblock(reader.getStream().handle);
-
-        const io_writer = &writer.interface;
+    pub fn init(io_writer: *std.Io.Writer) !DbusConnectionInitializer {
         try io_writer.writeByte(0);
         try io_writer.print("AUTH EXTERNAL 31303031\r\n", .{});
         try io_writer.flush();
 
         return .{
             .state = .wait_for_ok,
-            .writer = writer,
-            .reader = reader,
-            .on_init = on_init,
         };
     }
 
 
-    pub fn handler(self: *DbusConnectionInitializer) sphtud.event.LoopLinear.Handler {
-        return .{
-            .fd = self.reader.getStream().handle,
-            .ptr = self,
-            .vtable = &.{
-                .poll = poll,
-                .close = close,
-            },
-            .desired_events = .{
-                .read = true,
-                .write = false,
-            },
-        };
-    }
-
-    fn poll(ctx: ?*anyopaque, _: *sphtud.event.LoopLinear, _: sphtud.event.PollReason) sphtud.event.LoopLinear.PollResult {
-        const self: *DbusConnectionInitializer = @ptrCast(@alignCast(ctx));
-        self.pollError() catch |e| {
-            if (e == error.ReadFailed) {
-                if (self.reader.getError()) |reader_err| {
-                    if (reader_err == error.WouldBlock) {
-                        return .in_progress;
-                    }
-                }
-            }
-
-            std.log.err("connection init failed, closing: {t}", .{e});
-            return .complete;
-        };
-
-        std.debug.assert(self.state == .complete);
-        return .{
-            .replace_handler = self.on_init.handler(),
-        };
-    }
-
-    fn pollError(self: *DbusConnectionInitializer) !void {
-        const io_reader: *std.Io.Reader = self.reader.interface();
-        const io_writer = &self.writer.interface;
+    fn poll(self: *DbusConnectionInitializer, io_reader: *std.Io.Reader, io_writer: *std.Io.Writer) !bool {
         sw: switch (self.state) {
             .wait_for_ok => {
                 try waitForStartsWith(io_reader, "OK", error.NotOk);
@@ -427,146 +379,165 @@ pub const DbusConnectionInitializer = struct {
             },
             .wait_for_ack => {
                 try waitForStartsWith(io_reader, "AGREE_UNIX_FD", error.NoUnixFd);
+
                 try io_writer.print("BEGIN\r\n", .{});
+
+                var hello_writer = DbusMessageWriter {
+                    .pos = 0,
+                    .writer = io_writer,
+                };
+
+                try serializeHelloMsg(&hello_writer);
                 try io_writer.flush();
 
                 self.state = .complete;
                 continue :sw self.state;
             },
             .complete => {
-                var test_dbus_writer = DbusMessageWriter {
-                    .pos = 0,
-                    .writer = io_writer,
-                };
-
-                try serializeHelloMsg(&test_dbus_writer);
-                try io_writer.flush();
+                return true;
             },
-
         }
-
-    }
-
-    fn close(ctx: ?*anyopaque) void {
-        const self: *DbusConnectionInitializer = @ptrCast(@alignCast(ctx));
-        switch (self.state) {
-            .complete => return,
-            else => {},
-
-        }
-        self.reader.getStream().close();
     }
 };
 
-pub const DbusConnection = struct {
-    scratch: sphtud.alloc.LinearAllocator,
-    reader: *std.net.Stream.Reader,
+pub fn DbusConnection(comptime Loop: type) type {
+    return struct {
+        scratch: sphtud.alloc.LinearAllocator,
+        reader: *std.net.Stream.Reader,
+        writer: *std.net.Stream.Writer,
+        state: union(enum) {
+            initializing: DbusConnectionInitializer,
+            ready,
+        },
 
-    pub fn handler(self: *DbusConnection) sphtud.event.LoopLinear.Handler {
-        return .{
-            .fd = self.reader.getStream().handle,
-            .ptr = self,
-            .vtable = &.{
-                .poll = poll,
-                .close = close,
-            },
-            .desired_events = .{
-                .read = true,
-                .write = false,
-            },
-        };
-    }
+        const Self = @This();
 
-    fn poll(ctx: ?*anyopaque, _: *sphtud.event.LoopLinear, _: sphtud.event.PollReason) sphtud.event.LoopLinear.PollResult {
-        const self: *DbusConnection = @ptrCast(@alignCast(ctx));
-        self.pollError() catch |e| switch (e) {
-            error.ReadFailed => {
-                if (self.reader.getError()) |reader_err| switch (reader_err) {
-                    error.WouldBlock => {
-                        std.log.debug("wait time", .{});
-                        return .in_progress;
-                    },
-                    else => {
-                        std.log.err("read failed, closing connection: {t}", .{reader_err});
-                        return .complete;
+        pub fn init(scratch: sphtud.alloc.LinearAllocator, reader: *std.net.Stream.Reader, writer: *std.net.Stream.Writer) !Self {
+            try sphtud.event.setNonblock(reader.getStream().handle);
 
-                    },
-                };
-            },
-            else => {
-                std.log.err("Closing connection: {t}", .{e});
-                return .complete;
-            },
-        };
+            return .{
+                .scratch = scratch,
+                .writer = writer,
+                .reader = reader,
+                .state = .{
+                    .initializing = try DbusConnectionInitializer.init(&writer.interface),
+                },
+            };
 
-        return .in_progress;
-    }
+        }
 
-    fn pollError(self: *DbusConnection) !void {
-        const io_reader: *std.Io.Reader = self.reader.interface();
+        pub fn handler(self: *Self) Loop.Handler {
+            return .{
+                .fd = self.reader.getStream().handle,
+                .ptr = self,
+                .vtable = &.{
+                    .poll = poll,
+                    .close = close,
+                },
+                .desired_events = .{
+                    .read = true,
+                    .write = false,
+                },
+            };
+        }
 
+        fn poll(ctx: ?*anyopaque, _: *Loop, _: sphtud.event.PollReason) Loop.PollResult {
+            const self: *Self = @ptrCast(@alignCast(ctx));
+            self.pollError() catch |e| switch (e) {
+                error.ReadFailed => {
+                    if (self.reader.getError()) |reader_err| switch (reader_err) {
+                        error.WouldBlock => {
+                            return .in_progress;
+                        },
+                        else => {
+                            std.log.err("read failed, closing connection: {t}", .{reader_err});
+                            return .complete;
 
-        while (true) {
-            // It's easier to parse from a buffer than it is to write
-            // Message.parse in a way where it doesn't consume bytes from
-            // the reader for a partial read. Fill in outer loop as much as
-            // possible, then if the parse fails below because there wasn't
-            // enough data, we can just fill again until we return WouldBlock
-            // here
-            try io_reader.fillMore();
+                        },
+                    };
+                },
+                else => {
+                    std.log.err("Closing connection: {t}", .{e});
+                    return .complete;
+                },
+            };
 
-            while (true) {
-                const cp = self.scratch.checkpoint();
-                defer self.scratch.restore(cp);
+            return .in_progress;
+        }
 
-                var tmp_reader = std.Io.Reader.fixed(io_reader.buffered());
-
-                const header = Message.parse(self.scratch.allocator(), &tmp_reader) catch |e| switch (e) {
-                    error.EndOfStream => break,
-                    else => return e,
-                };
-                std.debug.print("{f}\n", .{header});
-
-                io_reader.toss(tmp_reader.seek);
+        fn pollError(self: *Self) !void {
+            sw: switch (self.state) {
+                .initializing => |*initializer| {
+                    if (!try initializer.poll(self.reader.interface(), &self.writer.interface)) {
+                        return;
+                    }
+                    self.state = .ready;
+                    continue :sw self.state;
+                },
+                .ready => {
+                    try self.pollReady();
+                },
             }
         }
-    }
 
-    fn close(ctx: ?*anyopaque) void {
-        const self: *DbusConnection = @ptrCast(@alignCast(ctx));
-        self.reader.getStream().close();
-    }
+        fn pollReady(self: *Self) !void {
+            const io_reader: *std.Io.Reader = self.reader.interface();
+            while (true) {
+                // It's easier to parse from a buffer than it is to write
+                // Message.parse in a way where it doesn't consume bytes from
+                // the reader for a partial read. Fill in outer loop as much as
+                // possible, then if the parse fails below because there wasn't
+                // enough data, we can just fill again until we return WouldBlock
+                // here
+                try io_reader.fillMore();
 
-};
+                while (true) {
+                    const cp = self.scratch.checkpoint();
+                    defer self.scratch.restore(cp);
+
+                    var tmp_reader = std.Io.Reader.fixed(io_reader.buffered());
+
+                    const header = Message.parse(self.scratch.allocator(), &tmp_reader) catch |e| switch (e) {
+                        error.EndOfStream => break,
+                        else => return e,
+                    };
+                    std.debug.print("{f}\n", .{header});
+
+                    io_reader.toss(tmp_reader.seek);
+                }
+            }
+        }
+
+        fn close(ctx: ?*anyopaque) void {
+            const self: *Self = @ptrCast(@alignCast(ctx));
+            self.reader.getStream().close();
+        }
+
+    };
+}
 
 pub fn main() !void {
     var alloc_buf: [1 * 1024 * 1024]u8 = undefined;
-    var alloc = sphtud.alloc.BufAllocator.init(&alloc_buf);
-    const scratch = alloc.backLinear();
+    var buf_alloc = sphtud.alloc.BufAllocator.init(&alloc_buf);
+
+    const alloc = buf_alloc.allocator();
+    const scratch = buf_alloc.backLinear();
 
     const session_address = std.posix.getenv("DBUS_SESSION_BUS_ADDRESS") orelse return error.NoSessionAddress;
     const socket_path = try extractUnixPathFromAddress(session_address);
 
     const socket = try std.net.connectUnixSocket(socket_path);
 
-    var reader_buf: [4096]u8 = undefined;
-    var reader = socket.reader(&reader_buf);
+    var reader = socket.reader(try alloc.alloc(u8, 4096));
+    var writer = socket.writer(try alloc.alloc(u8, 4096));
 
-    var writer_buf: [4096]u8 = undefined;
-    var writer = socket.writer(&writer_buf);
-
-    var connection = DbusConnection {
-        .scratch = scratch,
-        .reader = &reader,
-    };
-    var initializer = try DbusConnectionInitializer.init(&reader, &writer, &connection);
+    var connection = try DbusConnection(sphtud.event.LoopLinear).init(scratch, &reader, &writer);
 
     var loop = try sphtud.event.LoopLinear.init(
-        alloc.allocator(),
-        alloc.allocator(),
-        // FIXME limits go here
+        alloc,
+        alloc,
     );
-    try loop.register(initializer.handler());
+    try loop.register(connection.handler());
 
     const cp = scratch.checkpoint();
     while (true) {

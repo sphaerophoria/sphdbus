@@ -771,8 +771,8 @@ fn onPlayFinished(ctx: ?*anyopaque, _: DbusVal) void {
         "/org/mpris/MediaPlayer2",
          "org.mpris.MediaPlayer2.spotify",
          "org.mpris.MediaPlayer2.Player",
-         "Position",
-         .empty,
+         "Seek",
+         .{ .i64 = -10000000 },
          null,
     ) catch unreachable;
 }

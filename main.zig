@@ -315,7 +315,7 @@ const HeaderFieldKV = struct {
     val: DbusVal,
 };
 
-const Message = struct {
+const DbusHeader = struct {
     endianness: DbusEndianness,
     message_type: MsgType,
     flags: u8,
@@ -323,9 +323,8 @@ const Message = struct {
     body_len: u32,
     serial: u32,
     header_fields: []const HeaderFieldKV,
-    body_signature: []const u8,
 
-    fn parse(alloc: std.mem.Allocator, io_reader: *std.Io.Reader) !Message {
+    fn parse(alloc: std.mem.Allocator, io_reader: *std.Io.Reader) !DbusHeader {
         var dbus_reader = DbusMessageReader {
             .pos = 0,
             .reader = io_reader,
@@ -377,12 +376,11 @@ const Message = struct {
             .body_len = body_len,
             .serial = serial,
             .header_fields = try alloc.dupe(HeaderFieldKV, headers_tmp.items),
-            .body_signature = body_signature,
         };
     }
 
 
-    pub fn call(serial: u32, path: []const u8, destionation: []const u8, interface: []const u8, member: []const u8, body: anytype, field_buf: []HeaderFieldKV) !Message {
+    pub fn call(serial: u32, path: []const u8, destionation: []const u8, interface: []const u8, member: []const u8, body: anytype, field_buf: []HeaderFieldKV) !DbusHeader {
         var header_fields = std.ArrayList(HeaderFieldKV).initBuffer(field_buf);
         try header_fields.appendSliceBounded(&.{
             .{
@@ -415,7 +413,7 @@ const Message = struct {
         var discarding_writer = std.Io.Writer.Discarding.init(&.{});
         try dbusSerialize(&discarding_writer.writer, body);
 
-        return Message {
+        return DbusHeader {
             .endianness = .little,
             .message_type = .call,
             .flags = 0, // FIXME: Might have to have flags sometimes
@@ -423,11 +421,10 @@ const Message = struct {
             .body_len = @intCast(discarding_writer.fullCount()),
             .serial = serial,
             .header_fields = header_fields.items,
-            .body_signature= body_signature,
         };
     }
 
-    fn serialize(self: Message, io_writer: *std.Io.Writer, body: anytype) !void {
+    fn serialize(self: DbusHeader, io_writer: *std.Io.Writer, body: anytype) !void {
         // We don't handle this below I don't think
         std.debug.assert(self.endianness == .little);
 
@@ -458,9 +455,9 @@ const Message = struct {
             try header_field_writer.writeVariantTag(tag);
             switch (header_field.val) {
                 .string, .object => |v| try header_field_writer.writeStringLike(v),
-                .signature => {
-                    try header_field_writer.writeByte(@intCast(self.body_signature.len - 1));
-                    try header_field_writer.writeAll(self.body_signature);
+                .signature => |v| {
+                    try header_field_writer.writeByte(@intCast(v.len - 1));
+                    try header_field_writer.writeAll(v);
                 },
                 else => unreachable,
             }
@@ -473,18 +470,36 @@ const Message = struct {
         try dbusSerialize(w.writer, body);
     }
 
-    pub fn format(self: Message, w: *std.Io.Writer) !void {
-            try w.print("endianness: {}\n" ,.{self.endianness});
-            try w.print("message_type: {}\n" ,.{self.message_type});
-            try w.print("flags: {}\n" ,.{self.flags});
-            try w.print("major_version: {}\n" ,.{self.major_version});
-            try w.print("body_len: {}\n" ,.{self.body_len});
-            try w.print("serial: {}\n" ,.{self.serial});
+    pub fn format(self: DbusHeader, w: *std.Io.Writer) !void {
+        try w.print("endianness: {}\n" ,.{self.endianness});
+        try w.print("message_type: {}\n" ,.{self.message_type});
+        try w.print("flags: {}\n" ,.{self.flags});
+        try w.print("major_version: {}\n" ,.{self.major_version});
+        try w.print("body_len: {}\n" ,.{self.body_len});
+        try w.print("serial: {}\n" ,.{self.serial});
 
-            try w.print("headers\n" ,.{});
-            for (self.header_fields) |f| {
-                try w.print("    {t}: {f}\n" ,.{f.typ, f.val});
+        try w.print("headers\n" ,.{});
+        for (self.header_fields) |f| {
+            try w.print("    {t}: {f}\n" ,.{f.typ, f.val});
+        }
+    }
+
+    pub fn getHeader(self: DbusHeader, header: HeaderField) ?DbusVal {
+        for (self.header_fields) |f| {
+            if (f.typ == header) {
+                return f.val;
             }
+        }
+
+        return null;
+    }
+
+    pub fn signature(self: DbusHeader) ![]const u8 {
+        const s = self.getHeader(.signature) orelse return "";
+        switch (s) {
+            .signature => |v| return v,
+            else => return error.InvaliHeader,
+        }
     }
 };
 
@@ -522,7 +537,7 @@ pub const DbusConnectionInitializer = struct {
 
                 try io_writer.print("BEGIN\r\n", .{});
 
-                const hello_message = Message {
+                const hello_message = DbusHeader {
                     .endianness = .little,
                     .message_type = .call,
                     .flags = 0,
@@ -547,7 +562,6 @@ pub const DbusConnectionInitializer = struct {
                             .val = .{ .string = "Hello" },
                         },
                     },
-                    .body_signature = "",
                 };
                 try hello_message.serialize(io_writer, .{});
                 try io_writer.flush();
@@ -575,26 +589,39 @@ const CompletionHandler = struct {
     }
 };
 
+fn dbusSerializeInner(dbus_writer: *DbusMessageWriter, val: anytype) !void {
+    switch (@TypeOf(val)) {
+        DbusString, DbusObject => {
+            try dbus_writer.writeStringLike(val.inner);
+            return;
+        },
+        i64 => {
+            try dbus_writer.writeI64(val);
+            return;
+        },
+        else => {},
+    }
+
+    switch (@typeInfo(@TypeOf(val))) {
+        .@"struct" => |si| {
+            inline for (si.fields) |field| {
+                try dbusSerializeInner(dbus_writer, @field(val, field.name));
+            }
+            return;
+        },
+        else => {},
+    }
+
+    @compileError("Unhandled type " ++ @typeName(@TypeOf(val)));
+}
+
 fn dbusSerialize(io_writer: *std.Io.Writer, val: anytype) !void {
     var dbus_writer = DbusMessageWriter {
         .pos = 0,
         .writer = io_writer,
     };
 
-    inline for (std.meta.fields(@TypeOf(val))) |field| {
-        switch (field.type) {
-            DbusString, DbusObject => {
-                const field_val = @field(val, field.name);
-                try dbus_writer.writeStringLike(field_val.inner);
-            },
-            i64 => {
-                const field_val = @field(val, field.name);
-                try dbus_writer.writeI64(field_val);
-            },
-            else => @compileError("Unhandled type " ++ @typeName(field.type)),
-        }
-    }
-    std.debug.print("dbus_writer pos: {d}\n", .{dbus_writer.pos});
+    return dbusSerializeInner(&dbus_writer, val);
 }
 
 fn dbusParseBody(comptime T: type, alloc: std.mem.Allocator, endianness: DbusEndianness, signature: []const u8, body: []const u8) !T {
@@ -689,7 +716,7 @@ pub fn DbusConnection(comptime Loop: type) type {
         pub fn call(self: *Self, path: []const u8, destionation: []const u8, interface: []const u8, member: []const u8, body: anytype, on_finish: ?CompletionHandler) !void {
 
             var field_buf: [6]HeaderFieldKV = undefined;
-            const to_send = try Message.call(
+            const to_send = try DbusHeader.call(
                 self.serial,
                 path,
                 destionation,
@@ -753,7 +780,7 @@ pub fn DbusConnection(comptime Loop: type) type {
             const io_reader: *std.Io.Reader = self.reader.interface();
             while (true) {
                 // It's easier to parse from a buffer than it is to write
-                // Message.parse in a way where it doesn't consume bytes from
+                // DbusHeader.parse in a way where it doesn't consume bytes from
                 // the reader for a partial read. Fill in outer loop as much as
                 // possible, then if the parse fails below because there wasn't
                 // enough data, we can just fill again until we return WouldBlock
@@ -768,7 +795,7 @@ pub fn DbusConnection(comptime Loop: type) type {
 
                     std.debug.print("Received {s}\n", .{io_reader.buffered()});
 
-                    const message = Message.parse(self.scratch.allocator(), &tmp_reader) catch |e| switch (e) {
+                    const message = DbusHeader.parse(self.scratch.allocator(), &tmp_reader) catch |e| switch (e) {
                         error.EndOfStream => break,
                         else => return e,
                     };
@@ -794,7 +821,7 @@ pub fn DbusConnection(comptime Loop: type) type {
 
                     if (reply_for) |rf| {
                         if (self.outstanding_requests.remove(rf)) |h| {
-                            h.onFinish(message.endianness, message.body_signature, body_buf);
+                            h.onFinish(message.endianness, try message.signature(), body_buf);
                         }
                     }
                 }
@@ -899,9 +926,9 @@ pub fn main() !void {
 
     var msg_reader = std.Io.Reader.fixed(msg);
 
-    const parsed = try Message.parse(scratch.allocator(), &msg_reader);
+    const parsed = try DbusHeader.parse(scratch.allocator(), &msg_reader);
     std.debug.print("{f}\n", .{parsed});
-    const params = try dbusParseBody(GetMessageParams, scratch.allocator(), parsed.endianness, parsed.body_signature, msg_reader.buffered());
+    const params = try dbusParseBody(GetMessageParams, scratch.allocator(), parsed.endianness, try parsed.signature(), msg_reader.buffered());
     std.debug.print("interface name: {s}\n", .{params.interface_name.inner});
     std.debug.print("property name: {s}\n", .{params.property_name.inner});
 
@@ -909,7 +936,7 @@ pub fn main() !void {
     var buf_writer = std.Io.Writer.fixed(&wbuf);
     var field_buf: [6]HeaderFieldKV = undefined;
     const body = .{ DbusString { .inner = "org.mpris.MediaPlayer2.Player" }, DbusString { .inner = "Position" } };
-    const out = try Message.call(
+    const out = try DbusHeader.call(
         5,
         "/org/mpris/MediaPlayer2",
          "org.mpris.MediaPlayer2.spotify",

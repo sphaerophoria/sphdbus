@@ -1,5 +1,6 @@
 const std = @import("std");
 const sphtud = @import("sphtud");
+const dbus = @import("dbus.zig");
 
 // node -> interface -> method
 
@@ -148,28 +149,61 @@ fn interfaceTypeName(name: []const u8) InterfaceTypeNameFormatter {
     return .{ .name = name };
 }
 
-fn dbusToZigType(typ: []const u8) []const u8 {
-    std.debug.assert(typ.len == 1);
-    return switch (typ[0]) {
-        'u' => "u32",
-        'i' => "i32",
-        't' => "u64",
-        'o' => "dbus.DbusObject",
-        's' => "dbus.DbusString",
-        'b' => "bool",
-        else => {
-            std.log.err("Unhandled type {c}" ,.{typ[0]});
-            unreachable;
-        },
-    };
+const DbusToZigTypeFormatter = struct {
+    typ: []const u8,
+
+    pub fn format(self: DbusToZigTypeFormatter, writer: *std.Io.Writer) !void {
+        var reader = std.Io.Reader.fixed(self.typ);
+        var tokenizer = dbus.SignatureTokenizer {
+            .reader = &reader,
+        };
+
+        var in_struct = false;
+
+        while (true) {
+            const tag = tokenizer.next() catch {
+                return error.WriteFailed;
+            } orelse break;
+
+            switch (tag) {
+                .array_start => {
+                    // upgrade to stack on failure
+                    std.debug.assert(in_struct == false);
+                    try writer.writeAll("[]struct { ");
+                    in_struct = true;
+                },
+                .array_end => {
+                    try writer.writeAll("}");
+                    in_struct = false;
+                },
+                .u32 => try writer.writeAll("u32"),
+                .u64 => try writer.writeAll("u64"),
+                .i32 => try writer.writeAll("i32"),
+                .i64 => try writer.writeAll("i64"),
+                .object => try writer.writeAll("dbus.DbusObject"),
+                .string => try writer.writeAll("dbus.DbusString"),
+                .bool => try writer.writeAll("bool"),
+            }
+
+            switch (tag) {
+                .array_start, .array_end => {},
+                else => {
+                    if (in_struct) {
+                        try writer.writeAll(", ");
+                    }
+                },
+
+            }
+
+        }
+    }
+};
+
+fn dbusToZigType(typ: []const u8) DbusToZigTypeFormatter {
+    return .{ .typ = typ };
 }
 
 fn isArgSupported(method: Method, arg: MethodArg) bool {
-    if (arg.typ.len > 1) {
-        std.log.warn("Unhandled type \"{s}\" for method {s}", .{arg.typ, method.name});
-        return false;
-    }
-
     if (arg.typ[0] == 'h') {
         std.log.warn("Do not yet support passing fds, {s} unsupported", .{method.name});
         return false;
@@ -192,6 +226,7 @@ fn isMethodSupported(method: Method) bool {
     return true;
 }
 
+
 const PascalToCamelFormatter = struct {
     val: []const u8,
 
@@ -205,9 +240,24 @@ fn pascalToCamel(val: []const u8) PascalToCamelFormatter {
     return .{ .val = val };
 }
 
+const ReservedWords = enum {
+    @"suspend",
+    @"type",
+};
+
+
+fn dodgeReservedKeyword(val: []const u8) []const u8 {
+    const tag = std.meta.stringToEnum(ReservedWords, val) orelse return val;
+    return switch (tag) {
+        .@"suspend" => "@\"suspend\"",
+        .@"type" => "typ",
+    };
+}
+
 pub fn main() !void {
-    var alloc_buf: [2 * 1024 * 1024]u8 = undefined;
+    var alloc_buf: [4 * 1024 * 1024]u8 = undefined;
     var root_alloc = sphtud.alloc.BufAllocator.init(&alloc_buf);
+    const scratch = root_alloc.backLinear();
 
     const args = try std.process.argsAlloc(root_alloc.allocator());
     const schema_path = args[1];
@@ -215,9 +265,6 @@ pub fn main() !void {
 
     const f = try std.fs.cwd().openFile(schema_path, .{});
     var f_reader = f.reader(try root_alloc.allocator().alloc(u8, 4096));
-
-    var out_f = try std.fs.cwd().createFile(output_path, .{});
-    var f_writer = out_f.writer(try root_alloc.allocator().alloc(u8, 4096));
 
     var content_writer = std.Io.Writer.Discarding.init(&.{});
     var parser = sphtud.xml.Parser.init(&f_reader.interface);
@@ -235,14 +282,19 @@ pub fn main() !void {
         try dbus_parser.step(item);
     }
 
-    try f_writer.interface.writeAll(
+    var f_writer = std.Io.Writer.Allocating.init(root_alloc.allocator());
+    try f_writer.writer.writeAll(
         // FIXME: Better path
-        \\const dbus = @import("main.zig");
+        \\const dbus = @import("dbus");
+        \\const sphtud = @import("sphtud");
+        \\const std = @import("std");
         \\
         \\fn generateCommonResponseHandler(comptime T: type, ctx: ?*anyopaque, comptime callback: *const fn(ctx: ?*anyopaque, T) anyerror!void) dbus.CompletionHandler {
         \\    const genericCb = struct {
-        \\        fn f(ctx_2: ?*anyopaque, endianness: dbus.DbusEndianness, signature: []const u8, body: []const u8) !void {
-        \\            const val = try dbus.dbusParseBody(T, endianness, signature, body);
+        \\        fn f(ctx_2: ?*anyopaque, scratch: *sphtud.alloc.BufAllocator, endianness: dbus.DbusEndianness, signature: []const u8, body: []const u8) !void {
+        \\            const cp = scratch.checkpoint();
+        \\            defer scratch.restore(cp);
+        \\            const val = try dbus.dbusParseBody(T, scratch.allocator(), scratch.backLinear(), endianness, signature, body);
         \\            try callback(ctx_2, val);
         \\        }
         \\    }.f;
@@ -260,11 +312,12 @@ pub fn main() !void {
 
     var interface_iter = dbus_parser.output.iter();
     while (interface_iter.next()) |interface| {
+
         if (!std.mem.eql(u8, interface.name, "org.freedesktop.login1.Manager")) {
             continue;
         }
 
-        try f_writer.interface.print(
+        try f_writer.writer.print(
             \\pub const {f} = struct {{
             \\
             , .{interfaceTypeName(interface.name)}
@@ -272,11 +325,14 @@ pub fn main() !void {
 
         var method_it = interface.methods.iter();
         while (method_it.next()) |method| {
+            const cp = scratch.checkpoint();
+            defer scratch.restore(cp);
+
             if (!isMethodSupported(method.*)) {
                 continue;
             }
 
-            try f_writer.interface.print(
+            try f_writer.writer.print(
                 \\    pub const {s}Response = struct {{
                 \\
                 , .{method.name}
@@ -284,8 +340,8 @@ pub fn main() !void {
 
             var ret_it = method.ret.iter();
             while (ret_it.next()) |arg| {
-                try f_writer.interface.print(
-                    \\        {s}: {s},
+                try f_writer.writer.print(
+                    \\        {s}: {f},
                     \\
                 , .{
                     arg.name,
@@ -293,13 +349,13 @@ pub fn main() !void {
                 });
             }
 
-            try f_writer.interface.writeAll(
+            try f_writer.writer.writeAll(
                 \\    };
                 \\
             );
         }
 
-        try f_writer.interface.writeAll(
+        try f_writer.writer.writeAll(
             \\    pub fn interface(connection: anytype, service: []const u8, object_path: []const u8) Interface(@TypeOf(connection)) {{
             \\        return .{
             \\            .connection = connection,
@@ -324,8 +380,8 @@ pub fn main() !void {
         method_it = interface.methods.iter();
         while (method_it.next()) |method| {
             if (!isMethodSupported(method.*)) continue;
-            try f_writer.interface.print(
-                \\            pub fn {f}(
+            try f_writer.writer.print(
+                \\            pub fn @"{f}"(
                 \\                self: Self,
                 \\
                 , .{pascalToCamel(method.name)}
@@ -333,8 +389,8 @@ pub fn main() !void {
 
             var arg_it = method.args.iter();
             while (arg_it.next()) |arg| {
-                try f_writer.interface.print(
-                    \\                {s}: {s},
+                try f_writer.writer.print(
+                    \\                @"{s}": {f},
                     \\
                     , .{
                         arg.name,
@@ -342,7 +398,7 @@ pub fn main() !void {
                     }
                 );
             }
-            try f_writer.interface.print(
+            try f_writer.writer.print(
                 \\                on_response_ctx: ?*anyopaque,
                 \\                comptime on_response_callback: ?*const fn(ctx: ?*anyopaque, {0s}Response) anyerror!void,
                 \\            ) !void {{
@@ -361,8 +417,8 @@ pub fn main() !void {
 
             arg_it = method.args.iter();
             while (arg_it.next()) |arg| {
-                try f_writer.interface.print(
-                    \\                        {s},
+                try f_writer.writer.print(
+                    \\                        @"{s}",
                     \\
                     , .{
                         arg.name,
@@ -370,7 +426,7 @@ pub fn main() !void {
                 );
             }
 
-            try f_writer.interface.print(
+            try f_writer.writer.print(
                 \\                    }},
                 \\                    if (on_response_callback) |c| generateCommonResponseHandler({s}Response, on_response_ctx, c) else null,
                 \\                );
@@ -383,7 +439,7 @@ pub fn main() !void {
 
         }
 
-        try f_writer.interface.writeAll(
+        try f_writer.writer.writeAll(
             \\        };
             \\    }
             \\};
@@ -391,5 +447,16 @@ pub fn main() !void {
         );
     }
 
-    try f_writer.interface.flush();
+    // To make ast parse happy
+    try f_writer.writer.writeByte(0);
+    try f_writer.writer.flush();
+
+    const written = f_writer.written();
+    const written_sentinel =  written[0..written.len - 1:0];
+    const parsed = try std.zig.Ast.parse(root_alloc.allocator(), written_sentinel, .zig);
+    var out_f = try std.fs.cwd().createFile(output_path, .{});
+    var actual_f_writer = out_f.writer(try root_alloc.allocator().alloc(u8, 4096));
+    try parsed.render(root_alloc.allocator(), &actual_f_writer.interface, .{ });
+    //try actual_f_writer.interface.writeAll(written_sentinel);
+    try actual_f_writer.interface.flush();
 }

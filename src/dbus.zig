@@ -5,7 +5,7 @@ const builtin = @import("builtin");
 fn waitForStartsWith(reader: *std.Io.Reader, start: []const u8, err: anyerror) !void {
     const response = try reader.takeDelimiterInclusive('\n');
     if (!std.mem.startsWith(u8, response, start)) {
-        std.debug.print("{s} is not {s}\n", .{response, start});
+        std.debug.print("{s} is not {s}\n", .{ response, start });
         return err;
     }
 }

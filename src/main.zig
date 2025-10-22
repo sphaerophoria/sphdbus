@@ -23,16 +23,16 @@ fn onPlayFinished(ctx: ?*anyopaque, _: dbus.DbusEndianness, _: []const u8, _: []
     const connection: *dbus.DbusConnection(sphtud.event.LoopLinear) = @ptrCast(@alignCast(ctx));
     connection.call(
         "/org/mpris/MediaPlayer2",
-         "org.mpris.MediaPlayer2.spotify",
-         "org.freedesktop.DBus.Properties",
-         "Get",
-         .{ dbus.DbusString { .inner = "org.mpris.MediaPlayer2.Player" }, dbus.DbusString { .inner = "Position" } },
-         .{
-             .ctx = null,
-             .vtable = &.{
-                 .onFinish = onPropertyFinished,
-             },
-         },
+        "org.mpris.MediaPlayer2.spotify",
+        "org.freedesktop.DBus.Properties",
+        "Get",
+        .{ dbus.DbusString{ .inner = "org.mpris.MediaPlayer2.Player" }, dbus.DbusString{ .inner = "Position" } },
+        .{
+            .ctx = null,
+            .vtable = &.{
+                .onFinish = onPropertyFinished,
+            },
+        },
     ) catch unreachable;
 }
 
@@ -46,11 +46,11 @@ fn onCanSleep(_: ?*anyopaque, response: login1.OrgFreedesktopLogin1Manager.CanSl
 
 fn onListUsers(_: ?*anyopaque, response: login1.OrgFreedesktopLogin1Manager.ListUsersResponse) !void {
     for (response.users) |user| {
-        std.debug.print("user {d} {s}: {s}\n", .{user[0], user[1].inner, user[2].inner});
+        std.debug.print("user {d} {s}: {s}\n", .{ user[0], user[1].inner, user[2].inner });
     }
 }
 
-fn onVolumeRetrieved(_: ?*anyopaque, response: struct { dbus.DbusVal } ) !void {
+fn onVolumeRetrieved(_: ?*anyopaque, response: struct { dbus.DbusVal }) !void {
     std.debug.print("volume: {d}\n", .{response[0].f64});
 }
 
@@ -88,7 +88,6 @@ pub fn main() !void {
     //std.debug.print("interface name: {s}\n", .{params.interface_name.inner});
     //std.debug.print("property name: {s}\n", .{params.property_name.inner});
 
-
     // endianness: .little
     // message_type: .call
     // flags: 0
@@ -121,10 +120,8 @@ pub fn main() !void {
         if (!called and connection.state == .ready) {
             called = true;
             try player.setVolumeProperty(
-                dbus.DbusVal { .f64 = 0.2 },
+                dbus.DbusVal{ .f64 = 0.2 },
             );
         }
-
     }
 }
-

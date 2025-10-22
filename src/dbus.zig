@@ -5,6 +5,7 @@ const builtin = @import("builtin");
 fn waitForStartsWith(reader: *std.Io.Reader, start: []const u8, err: anyerror) !void {
     const response = try reader.takeDelimiterInclusive('\n');
     if (!std.mem.startsWith(u8, response, start)) {
+        std.debug.print("{s} is not {s}\n", .{response, start});
         return err;
     }
 }
@@ -46,7 +47,7 @@ pub const SignatureTokenizer = struct {
             'v' => .variant,
             'd' => .f64,
             else => {
-                std.log.err("Unhandled type {c}" ,.{b});
+                std.log.err("Unhandled type {c}", .{b});
                 return error.UnhandledSignature;
             },
         };
@@ -62,7 +63,7 @@ pub const SignatureTokenizer = struct {
     }
 };
 
-pub const DbusEndianness = enum (u8) {
+pub const DbusEndianness = enum(u8) {
     little = 'l',
     big = 'b',
 
@@ -74,14 +75,13 @@ pub const DbusEndianness = enum (u8) {
     }
 };
 
-const MsgType = enum (u8) {
+const MsgType = enum(u8) {
     invalid = 0,
     call = 1,
     ret = 2,
     err = 3,
     signal = 4,
 };
-
 
 const DBusVersion = enum(u8) {
     @"1" = 1,
@@ -96,7 +96,6 @@ const HeaderField = enum(u8) {
     sender = 7,
     signature = 8,
 };
-
 
 const DbusMessageWriter = struct {
     pos: u32,
@@ -113,7 +112,6 @@ const DbusMessageWriter = struct {
         self.pos += 4;
     }
 
-
     fn writeF64(self: *DbusMessageWriter, val: f64) !void {
         try self.writeI64(@bitCast(val));
     }
@@ -123,7 +121,6 @@ const DbusMessageWriter = struct {
         try self.writer.writeInt(i64, val, builtin.cpu.arch.endian());
         self.pos += 8;
     }
-
 
     fn writeAll(self: *DbusMessageWriter, data: []const u8) !void {
         const len_u32 = std.math.cast(u32, data.len) orelse return error.InvalidLen;
@@ -236,7 +233,7 @@ const DbusMessageReader = struct {
             .string => {
                 const string_len = try self.readU32(endianness);
                 const s = try self.readBytes(string_len);
-                const ret = DbusVal{ .string = try dupeIfAlloc(alloc, u8, s)};
+                const ret = DbusVal{ .string = try dupeIfAlloc(alloc, u8, s) };
                 _ = try self.readByte();
                 return ret;
             },
@@ -244,14 +241,14 @@ const DbusMessageReader = struct {
             .object => {
                 const string_len = try self.readU32(endianness);
                 const s = try self.readBytes(string_len);
-                const ret = DbusVal{ .object = try dupeIfAlloc(alloc, u8, s)};
+                const ret = DbusVal{ .object = try dupeIfAlloc(alloc, u8, s) };
                 _ = try self.readByte();
                 return ret;
             },
             .signature => {
                 const string_len = try self.readByte();
                 const s = try self.readBytes(string_len + 1);
-                return DbusVal{ .signature = try dupeIfAlloc(alloc, u8, s)};
+                return DbusVal{ .signature = try dupeIfAlloc(alloc, u8, s) };
             },
             .u32 => {
                 const val = try self.readU32(endianness);
@@ -309,7 +306,6 @@ pub const DbusVal = union(SignatureTag) {
     f64: f64,
     unknown,
 
-
     pub fn tag(self: DbusVal) []const u8 {
         return SignatureTag.tag(self);
     }
@@ -328,14 +324,14 @@ pub const DbusVal = union(SignatureTag) {
     pub fn format(self: DbusVal, writer: *std.Io.Writer) !void {
         switch (self) {
             .empty => {},
-            .byte => |v| try writer.print("{d}" ,.{v}),
-            .string => |v| try writer.print("{s}" ,.{v}),
-            .object => |v| try writer.print("{s}" ,.{v}),
-            .signature => |v| try writer.print("{s}" ,.{v}),
-            .u32 => |v| try writer.print("{d}" ,.{v}),
-            .i64 => |v| try writer.print("{d}" ,.{v}),
+            .byte => |v| try writer.print("{d}", .{v}),
+            .string => |v| try writer.print("{s}", .{v}),
+            .object => |v| try writer.print("{s}", .{v}),
+            .signature => |v| try writer.print("{s}", .{v}),
+            .u32 => |v| try writer.print("{d}", .{v}),
+            .i64 => |v| try writer.print("{d}", .{v}),
             .f64 => |v| try writer.print("{d}", .{v}),
-            .unknown => try writer.print("unknown", .{}) ,
+            .unknown => try writer.print("unknown", .{}),
         }
     }
 };
@@ -349,7 +345,7 @@ fn parseSignature(sig: []const u8) !SignatureTag {
     if (std.mem.eql(u8, "\x00", sig)) return .empty;
     if (std.mem.eql(u8, "x\x00", sig)) return .i64;
     if (std.mem.eql(u8, "d\x00", sig)) return .f64;
-    std.log.err("Unimplemented signature: {s} (len {d})", .{sig, sig.len});
+    std.log.err("Unimplemented signature: {s} (len {d})", .{ sig, sig.len });
     return .unknown;
 }
 
@@ -368,7 +364,7 @@ pub const DbusHeader = struct {
     header_fields: []const HeaderFieldKV,
 
     pub fn parse(alloc: std.mem.Allocator, io_reader: *std.Io.Reader) !DbusHeader {
-        var dbus_reader = DbusMessageReader {
+        var dbus_reader = DbusMessageReader{
             .pos = 0,
             .reader = io_reader,
         };
@@ -422,7 +418,6 @@ pub const DbusHeader = struct {
         };
     }
 
-
     pub fn call(serial: u32, path: []const u8, destionation: []const u8, interface: []const u8, member: []const u8, body: anytype, field_buf: []HeaderFieldKV) !DbusHeader {
         var header_fields = std.ArrayList(HeaderFieldKV).initBuffer(field_buf);
         try header_fields.appendSliceBounded(&.{
@@ -449,14 +444,16 @@ pub const DbusHeader = struct {
         if (body_signature.len > 1) {
             try header_fields.appendBounded(.{
                 .typ = .signature,
-                .val = .{ .signature = body_signature, },
+                .val = .{
+                    .signature = body_signature,
+                },
             });
         }
 
         var discarding_writer = std.Io.Writer.Discarding.init(&.{});
         try dbusSerialize(&discarding_writer.writer, body);
 
-        return DbusHeader {
+        return DbusHeader{
             .endianness = .little,
             .message_type = .call,
             .flags = 0, // FIXME: Might have to have flags sometimes
@@ -471,7 +468,7 @@ pub const DbusHeader = struct {
         // We don't handle this below I don't think
         std.debug.assert(self.endianness == .little);
 
-        var w = DbusMessageWriter {
+        var w = DbusMessageWriter{
             .pos = 0,
             .writer = io_writer,
         };
@@ -486,7 +483,7 @@ pub const DbusHeader = struct {
 
         var header_buf: [4096]u8 = undefined;
         var header_field_io = std.Io.Writer.fixed(&header_buf);
-        var header_field_writer = DbusMessageWriter {
+        var header_field_writer = DbusMessageWriter{
             .pos = w.pos + 4,
             .writer = &header_field_io,
         };
@@ -505,16 +502,16 @@ pub const DbusHeader = struct {
     }
 
     pub fn format(self: DbusHeader, w: *std.Io.Writer) !void {
-        try w.print("endianness: {}\n" ,.{self.endianness});
-        try w.print("message_type: {}\n" ,.{self.message_type});
-        try w.print("flags: {}\n" ,.{self.flags});
-        try w.print("major_version: {}\n" ,.{self.major_version});
-        try w.print("body_len: {}\n" ,.{self.body_len});
-        try w.print("serial: {}\n" ,.{self.serial});
+        try w.print("endianness: {}\n", .{self.endianness});
+        try w.print("message_type: {}\n", .{self.message_type});
+        try w.print("flags: {}\n", .{self.flags});
+        try w.print("major_version: {}\n", .{self.major_version});
+        try w.print("body_len: {}\n", .{self.body_len});
+        try w.print("serial: {}\n", .{self.serial});
 
-        try w.print("headers\n" ,.{});
+        try w.print("headers\n", .{});
         for (self.header_fields) |f| {
-            try w.print("    {t}: {f}\n" ,.{f.typ, f.val});
+            try w.print("    {t}: {f}\n", .{ f.typ, f.val });
         }
     }
 
@@ -546,6 +543,7 @@ pub const DbusConnectionInitializer = struct {
 
     pub fn init(io_writer: *std.Io.Writer) !DbusConnectionInitializer {
         try io_writer.writeByte(0);
+        // FIXME: Base off UID?
         try io_writer.print("AUTH EXTERNAL 31303031\r\n", .{});
         try io_writer.flush();
 
@@ -553,7 +551,6 @@ pub const DbusConnectionInitializer = struct {
             .state = .wait_for_ok,
         };
     }
-
 
     fn poll(self: *DbusConnectionInitializer, io_reader: *std.Io.Reader, io_writer: *std.Io.Writer) !bool {
         sw: switch (self.state) {
@@ -571,7 +568,7 @@ pub const DbusConnectionInitializer = struct {
 
                 try io_writer.print("BEGIN\r\n", .{});
 
-                const hello_message = DbusHeader {
+                const hello_message = DbusHeader{
                     .endianness = .little,
                     .message_type = .call,
                     .flags = 0,
@@ -615,7 +612,7 @@ pub const CompletionHandler = struct {
     vtable: *const VTable,
 
     const VTable = struct {
-        onFinish: *const fn(ctx: ?*anyopaque, scratch: *sphtud.alloc.BufAllocator, endianness: DbusEndianness, signature: []const u8, val: []const u8) anyerror!void,
+        onFinish: *const fn (ctx: ?*anyopaque, scratch: *sphtud.alloc.BufAllocator, endianness: DbusEndianness, signature: []const u8, val: []const u8) anyerror!void,
     };
 
     fn onFinish(self: CompletionHandler, scratch: *sphtud.alloc.BufAllocator, endianness: DbusEndianness, signature: []const u8, val: []const u8) !void {
@@ -640,7 +637,6 @@ fn dbusSerializeInner(dbus_writer: *DbusMessageWriter, val: anytype) !void {
         f64 => {
             try dbus_writer.writeF64(val);
             return;
-
         },
         DbusVal => {
             try dbus_writer.writeVariant(val);
@@ -663,7 +659,7 @@ fn dbusSerializeInner(dbus_writer: *DbusMessageWriter, val: anytype) !void {
 }
 
 fn dbusSerialize(io_writer: *std.Io.Writer, val: anytype) !void {
-    var dbus_writer = DbusMessageWriter {
+    var dbus_writer = DbusMessageWriter{
         .pos = 0,
         .writer = io_writer,
     };
@@ -691,7 +687,7 @@ pub fn dbusParseBodyInner(comptime T: type, alloc: std.mem.Allocator, scratch: s
                 try dr.alignForwards(8);
 
                 while (dr.pos < start + array_len_bytes) {
-                    std.debug.print("at {d}, end at {d}\n", .{dr.pos, start + array_len_bytes});
+                    std.debug.print("at {d}, end at {d}\n", .{ dr.pos, start + array_len_bytes });
                     try builder.append(try dbusParseBodyInner(pi.child, alloc, scratch, endianness, dr));
                 }
 
@@ -732,7 +728,7 @@ pub fn dbusParseBody(comptime T: type, alloc: std.mem.Allocator, scratch: sphtud
     var reader = std.Io.Reader.fixed(body);
 
     if (!std.mem.eql(u8, signature, generateDbusSignature(T))) {
-        std.debug.print("Expected {s} got {s}\n", .{generateDbusSignature(T), signature});
+        std.debug.print("Expected {s} got {s}\n", .{ generateDbusSignature(T), signature });
         return error.InvalidType;
     }
 
@@ -740,7 +736,7 @@ pub fn dbusParseBody(comptime T: type, alloc: std.mem.Allocator, scratch: sphtud
     var body_reader = std.Io.Reader.fixed(reader.buffered());
     reader.toss(body.len);
 
-    var dr = DbusMessageReader {
+    var dr = DbusMessageReader{
         .pos = 0,
         .reader = &body_reader,
     };
@@ -762,7 +758,6 @@ pub fn DbusConnection(comptime Loop: type) type {
         outstanding_requests: sphtud.util.AutoHashMapLinear(u32, CompletionHandler),
 
         const Self = @This();
-
 
         pub fn init(alloc: std.mem.Allocator, scratch: *sphtud.alloc.BufAllocator, reader: *std.net.Stream.Reader, writer: *std.net.Stream.Writer) !Self {
             try sphtud.event.setNonblock(reader.getStream().handle);
@@ -800,7 +795,6 @@ pub fn DbusConnection(comptime Loop: type) type {
         }
 
         pub fn call(self: *Self, path: []const u8, destionation: []const u8, interface: []const u8, member: []const u8, body: anytype, on_finish: ?CompletionHandler) !void {
-
             var field_buf: [6]HeaderFieldKV = undefined;
             const to_send = try DbusHeader.call(
                 self.serial,
@@ -834,7 +828,6 @@ pub fn DbusConnection(comptime Loop: type) type {
                         else => {
                             std.log.err("read failed, closing connection: {t}", .{reader_err});
                             return .complete;
-
                         },
                     };
                 },
@@ -908,11 +901,9 @@ pub fn DbusConnection(comptime Loop: type) type {
                     if (reply_for) |rf| {
                         if (self.outstanding_requests.remove(rf)) |h| {
                             h.onFinish(self.scratch, message.endianness, try message.signature(), body_buf) catch |e| {
-
                                 std.log.err("Failed to call handler: {t}", .{e});
                                 if (@errorReturnTrace()) |st| {
                                     std.log.err("stack trace: {f}", .{st});
-
                                 }
                             };
                         }
@@ -925,7 +916,6 @@ pub fn DbusConnection(comptime Loop: type) type {
             const self: *Self = @ptrCast(@alignCast(ctx));
             self.reader.getStream().close();
         }
-
     };
 }
 
@@ -938,31 +928,30 @@ pub const DbusString = struct {
 };
 
 fn generateDbusSignatureInner(comptime T: type) []const u8 {
-        const fields = std.meta.fields(T);
-        var ret: []const u8 = "";
-        for (fields) |field| {
+    const fields = std.meta.fields(T);
+    var ret: []const u8 = "";
+    for (fields) |field| {
+        switch (@typeInfo(field.type)) {
+            .pointer => |pi| {
+                std.debug.assert(pi.size == .slice);
 
-            switch (@typeInfo(field.type)) {
-                .pointer => |pi| {
-                    std.debug.assert(pi.size == .slice);
-
-                    ret = ret ++ "a(" ++ generateDbusSignatureInner(pi.child) ++ ")";
-                    continue;
-                },
-                else => {},
-            }
-
-            ret = ret ++ switch (field.type) {
-                DbusString => "s",
-                DbusObject => "o",
-                i64 => "x",
-                u32 => "u",
-                DbusVal => "v",
-                f64 => "d",
-                else => @compileError("unimplemented for field type " ++ @typeName(field.type)),
-            };
+                ret = ret ++ "a(" ++ generateDbusSignatureInner(pi.child) ++ ")";
+                continue;
+            },
+            else => {},
         }
-        return ret;
+
+        ret = ret ++ switch (field.type) {
+            DbusString => "s",
+            DbusObject => "o",
+            i64 => "x",
+            u32 => "u",
+            DbusVal => "v",
+            f64 => "d",
+            else => @compileError("unimplemented for field type " ++ @typeName(field.type)),
+        };
+    }
+    return ret;
 }
 
 fn generateDbusSignature(comptime T: type) []const u8 {
@@ -980,7 +969,5 @@ test "dbus sig gen" {
         u: u32,
     });
 
-
     try std.testing.expectEqualStrings("soxu\x00", s);
 }
-

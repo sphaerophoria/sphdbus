@@ -40,7 +40,6 @@ const Interface = struct {
     }
 };
 
-
 const Property = struct {
     name: []const u8 = "",
     typ: []const u8 = "",
@@ -98,14 +97,12 @@ const DbusSchemaParser = struct {
                 }
 
                 if (std.mem.eql(u8, item.name, "property")) {
-
                     const name = (try item.attributeByKey("name")) orelse return error.NoPropertyName;
                     const typ = (try item.attributeByKey("type")) orelse return error.NoPropertyType;
                     const access_s = (try item.attributeByKey("access")) orelse return error.NoPropertyAccess;
 
                     const access = std.meta.stringToEnum(Property.PropertyAccess, access_s) orelse return error.UnimplementedAccess;
                     try self.current_interface.properties.append(.{
-
                         .access = access,
                         .typ = try self.alloc.dupe(u8, typ),
                         .name = try self.alloc.dupe(u8, name),
@@ -183,7 +180,7 @@ const DbusToZigTypeFormatter = struct {
 
     pub fn format(self: DbusToZigTypeFormatter, writer: *std.Io.Writer) !void {
         var reader = std.Io.Reader.fixed(self.typ);
-        var tokenizer = dbus.SignatureTokenizer {
+        var tokenizer = dbus.SignatureTokenizer{
             .reader = &reader,
         };
 
@@ -223,9 +220,7 @@ const DbusToZigTypeFormatter = struct {
                         try writer.writeAll(", ");
                     }
                 },
-
             }
-
         }
     }
 };
@@ -241,14 +236,12 @@ fn isTypeSupported(name: []const u8, typ: []const u8) bool {
     }
 
     var signature_reader = std.Io.Reader.fixed(typ);
-    var tokenizer = dbus.SignatureTokenizer { .reader = &signature_reader };
+    var tokenizer = dbus.SignatureTokenizer{ .reader = &signature_reader };
     while (true) {
         _ = tokenizer.next() catch {
-            std.log.warn("Failed to tokenize signature {s}, skipping method {s}", .{typ, name});
+            std.log.warn("Failed to tokenize signature {s}, skipping method {s}", .{ typ, name });
             return false;
         } orelse break;
-
-
     }
 
     return true;
@@ -274,7 +267,6 @@ fn isMethodSupported(method: Method) bool {
     return true;
 }
 
-
 const PascalToCamelFormatter = struct {
     val: []const u8,
 
@@ -290,15 +282,14 @@ fn pascalToCamel(val: []const u8) PascalToCamelFormatter {
 
 const ReservedWords = enum {
     @"suspend",
-    @"type",
+    type,
 };
-
 
 fn dodgeReservedKeyword(val: []const u8) []const u8 {
     const tag = std.meta.stringToEnum(ReservedWords, val) orelse return val;
     return switch (tag) {
         .@"suspend" => "@\"suspend\"",
-        .@"type" => "typ",
+        .type => "typ",
     };
 }
 
@@ -360,12 +351,10 @@ pub fn main() !void {
 
     var interface_iter = dbus_parser.output.iter();
     while (interface_iter.next()) |interface| {
-
         try f_writer.writer.print(
             \\pub const {f} = struct {{
             \\
-            , .{interfaceTypeName(interface.name)}
-        );
+        , .{interfaceTypeName(interface.name)});
 
         var method_it = interface.methods.iter();
         while (method_it.next()) |method| {
@@ -379,8 +368,7 @@ pub fn main() !void {
             try f_writer.writer.print(
                 \\    pub const {s}Response = struct {{
                 \\
-                , .{method.name}
-            );
+            , .{method.name});
 
             var ret_it = method.ret.iter();
             while (ret_it.next()) |arg| {
@@ -413,14 +401,11 @@ pub fn main() !void {
             \\            connection: ConnectionType,
             \\            service: []const u8,
             \\            object_path: []const u8,
-
             \\            const interface_name_to_serialize = "{s}";
-
             \\            const Self = @This();
             \\
             \\
-        , .{interface.name}
-        );
+        , .{interface.name});
 
         method_it = interface.methods.iter();
         while (method_it.next()) |method| {
@@ -429,19 +414,17 @@ pub fn main() !void {
                 \\            pub fn @"{f}"(
                 \\                self: Self,
                 \\
-                , .{pascalToCamel(method.name)}
-            );
+            , .{pascalToCamel(method.name)});
 
             var arg_it = method.args.iter();
             while (arg_it.next()) |arg| {
                 try f_writer.writer.print(
                     \\                @"{s}": {f},
                     \\
-                    , .{
-                        arg.name,
-                        dbusToZigType(arg.typ),
-                    }
-                );
+                , .{
+                    arg.name,
+                    dbusToZigType(arg.typ),
+                });
             }
             try f_writer.writer.print(
                 \\                on_response_ctx: ?*anyopaque,
@@ -454,21 +437,18 @@ pub fn main() !void {
                 \\                    "{0s}",
                 \\                    .{{
                 \\
-                ,
-                .{
-                    method.name,
-                }
-            );
+            , .{
+                method.name,
+            });
 
             arg_it = method.args.iter();
             while (arg_it.next()) |arg| {
                 try f_writer.writer.print(
                     \\                        @"{s}",
                     \\
-                    , .{
-                        arg.name,
-                    }
-                );
+                , .{
+                    arg.name,
+                });
             }
 
             try f_writer.writer.print(
@@ -477,11 +457,7 @@ pub fn main() !void {
                 \\                );
                 \\            }}
                 \\
-                ,
-                .{method.name}
-
-            );
-
+            , .{method.name});
         }
 
         var property_it = interface.properties.iter();
@@ -524,12 +500,10 @@ pub fn main() !void {
                 \\                );
                 \\            }}
                 \\
-                ,
-                .{
-                    property.name,
-                    interface.name,
-                }
-            );
+            , .{
+                property.name,
+                interface.name,
+            });
         }
 
         try f_writer.writer.writeAll(
@@ -545,7 +519,7 @@ pub fn main() !void {
     try f_writer.writer.flush();
 
     const written = f_writer.written();
-    const written_sentinel =  written[0..written.len - 1:0];
+    const written_sentinel = written[0 .. written.len - 1 :0];
     //const parsed = try std.zig.Ast.parse(root_alloc.allocator(), written_sentinel, .zig);
     var out_f = try std.fs.cwd().createFile(output_path, .{});
     var actual_f_writer = out_f.writer(try root_alloc.allocator().alloc(u8, 4096));

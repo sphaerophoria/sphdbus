@@ -7,7 +7,7 @@ pub fn build(b: *std.Build) !void {
     const sphtud_dep = b.dependency("sphtud", .{});
     const sphtud = sphtud_dep.module("sphtud");
 
-    const dbus_mod = b.createModule(.{
+    const dbus_mod = b.addModule("dbus", .{
         .root_source_file = b.path("src/dbus.zig"),
     });
     dbus_mod.addImport("sphtud", sphtud);
@@ -57,4 +57,5 @@ pub fn build(b: *std.Build) !void {
     example.root_module.addImport("mpris", mpris_mod);
 
     b.installArtifact(example);
+    b.installArtifact(generate);
 }

@@ -19,9 +19,11 @@ pub const SignatureTokenizer = struct {
         u64,
         i32,
         i64,
+        f64,
         object,
         string,
         bool,
+        variant,
     };
 
     pub fn next(self: SignatureTokenizer) !?Token {
@@ -40,6 +42,9 @@ pub const SignatureTokenizer = struct {
             'o' => .object,
             's' => .string,
             'b' => .bool,
+            'x' => .i64,
+            'v' => .variant,
+            'd' => .f64,
             else => {
                 std.log.err("Unhandled type {c}" ,.{b});
                 return error.UnhandledSignature;
@@ -108,6 +113,11 @@ const DbusMessageWriter = struct {
         self.pos += 4;
     }
 
+
+    fn writeF64(self: *DbusMessageWriter, val: f64) !void {
+        try self.writeI64(@bitCast(val));
+    }
+
     fn writeI64(self: *DbusMessageWriter, val: i64) !void {
         try self.alignForwards(8);
         try self.writer.writeInt(i64, val, builtin.cpu.arch.endian());
@@ -131,6 +141,20 @@ const DbusMessageWriter = struct {
 
         try self.writer.writeByte(0);
         self.pos += 1;
+    }
+
+    fn writeVariant(self: *DbusMessageWriter, val: DbusVal) !void {
+        const tag = val.tag();
+        try self.writeVariantTag(tag);
+        switch (val) {
+            .string, .object => |v| try self.writeStringLike(v),
+            .signature => |v| {
+                try self.writeByte(@intCast(v.len - 1));
+                try self.writeAll(v);
+            },
+            .f64 => |v| try self.writeF64(v),
+            else => unreachable,
+        }
     }
 
     fn writeStringLike(self: *DbusMessageWriter, s: []const u8) !void {
@@ -172,6 +196,10 @@ const DbusMessageReader = struct {
         const ret = try self.reader.takeInt(u32, endianness.toBuiltin());
         self.pos += 4;
         return ret;
+    }
+
+    fn readF64(self: *DbusMessageReader, endianness: DbusEndianness) !f64 {
+        return @bitCast(try self.readI64(endianness));
     }
 
     fn readI64(self: *DbusMessageReader, endianness: DbusEndianness) !i64 {
@@ -233,6 +261,10 @@ const DbusMessageReader = struct {
                 const val = try self.readI64(endianness);
                 return .{ .i64 = val };
             },
+            .f64 => {
+                const val = try self.readF64(endianness);
+                return .{ .f64 = val };
+            },
             .unknown => {
                 return .unknown;
             },
@@ -248,6 +280,7 @@ const SignatureTag = enum {
     signature,
     u32,
     i64,
+    f64,
     unknown,
 
     pub fn tag(self: SignatureTag) []const u8 {
@@ -259,12 +292,13 @@ const SignatureTag = enum {
             .signature => "g",
             .u32 => "u",
             .i64 => "x",
+            .f64 => "d",
             .unknown => unreachable,
         };
     }
 };
 
-const DbusVal = union(SignatureTag) {
+pub const DbusVal = union(SignatureTag) {
     empty,
     byte: u8,
     string: []const u8,
@@ -272,6 +306,7 @@ const DbusVal = union(SignatureTag) {
     signature: []const u8,
     u32: u32,
     i64: i64,
+    f64: f64,
     unknown,
 
 
@@ -299,11 +334,13 @@ const DbusVal = union(SignatureTag) {
             .signature => |v| try writer.print("{s}" ,.{v}),
             .u32 => |v| try writer.print("{d}" ,.{v}),
             .i64 => |v| try writer.print("{d}" ,.{v}),
+            .f64 => |v| try writer.print("{d}", .{v}),
             .unknown => try writer.print("unknown", .{}) ,
         }
     }
 };
 
+//FIXME:  feels duplicated with something or otehr
 fn parseSignature(sig: []const u8) !SignatureTag {
     if (std.mem.eql(u8, "s\x00", sig)) return .string;
     if (std.mem.eql(u8, "u\x00", sig)) return .u32;
@@ -311,6 +348,7 @@ fn parseSignature(sig: []const u8) !SignatureTag {
     if (std.mem.eql(u8, "o\x00", sig)) return .object;
     if (std.mem.eql(u8, "\x00", sig)) return .empty;
     if (std.mem.eql(u8, "x\x00", sig)) return .i64;
+    if (std.mem.eql(u8, "d\x00", sig)) return .f64;
     std.log.err("Unimplemented signature: {s} (len {d})", .{sig, sig.len});
     return .unknown;
 }
@@ -456,16 +494,7 @@ pub const DbusHeader = struct {
         for (self.header_fields) |header_field| {
             try header_field_writer.alignForwards(8); // struct alignment
             try header_field_writer.writeByte(@intFromEnum(header_field.typ));
-            const tag = header_field.val.tag();
-            try header_field_writer.writeVariantTag(tag);
-            switch (header_field.val) {
-                .string, .object => |v| try header_field_writer.writeStringLike(v),
-                .signature => |v| {
-                    try header_field_writer.writeByte(@intCast(v.len - 1));
-                    try header_field_writer.writeAll(v);
-                },
-                else => unreachable,
-            }
+            try header_field_writer.writeVariant(header_field.val);
         }
 
         try w.writeU32(header_field_writer.pos - w.pos - 4); // num headers
@@ -608,6 +637,15 @@ fn dbusSerializeInner(dbus_writer: *DbusMessageWriter, val: anytype) !void {
             try dbus_writer.writeU32(val);
             return;
         },
+        f64 => {
+            try dbus_writer.writeF64(val);
+            return;
+
+        },
+        DbusVal => {
+            try dbus_writer.writeVariant(val);
+            return;
+        },
         else => {},
     }
 
@@ -679,6 +717,9 @@ pub fn dbusParseBodyInner(comptime T: type, alloc: std.mem.Allocator, scratch: s
             },
             u32 => {
                 @field(ret, field.name) = try dr.readU32(endianness);
+            },
+            f64 => {
+                @field(ret, field.name) = try dr.readF64(endianness);
             },
             else => @compileError("Unsupported type " ++ @typeName(field.type)),
         }
@@ -871,6 +912,7 @@ pub fn DbusConnection(comptime Loop: type) type {
                                 std.log.err("Failed to call handler: {t}", .{e});
                                 if (@errorReturnTrace()) |st| {
                                     std.log.err("stack trace: {f}", .{st});
+
                                 }
                             };
                         }
@@ -916,6 +958,7 @@ fn generateDbusSignatureInner(comptime T: type) []const u8 {
                 i64 => "x",
                 u32 => "u",
                 DbusVal => "v",
+                f64 => "d",
                 else => @compileError("unimplemented for field type " ++ @typeName(field.type)),
             };
         }

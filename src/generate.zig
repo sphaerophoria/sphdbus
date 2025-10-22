@@ -1,6 +1,6 @@
 const std = @import("std");
 const sphtud = @import("sphtud");
-const dbus = @import("dbus.zig");
+const dbus = @import("sphdbus.zig");
 
 // node -> interface -> method
 
@@ -213,7 +213,7 @@ const DbusToZigTypeFormatter = struct {
                 .object => try writer.writeAll("dbus.DbusObject"),
                 .string => try writer.writeAll("dbus.DbusString"),
                 .bool => try writer.writeAll("bool"),
-                .variant => try writer.writeAll("dbus.DbusVal"),
+                .variant => try writer.writeAll("dbus.Variant"),
             }
 
             switch (tag) {
@@ -327,7 +327,7 @@ pub fn main() !void {
     var f_writer = std.Io.Writer.Allocating.init(root_alloc.allocator());
     try f_writer.writer.writeAll(
         // FIXME: Better path
-        \\const dbus = @import("dbus");
+        \\const dbus = @import("sphdbus");
         \\const sphtud = @import("sphtud");
         \\const std = @import("std");
         \\
@@ -470,7 +470,7 @@ pub fn main() !void {
                 \\            pub fn @"get{0s}"(
                 \\                self: Self,
                 \\                on_response_ctx: ?*anyopaque,
-                \\                comptime on_response_callback: ?*const fn(ctx: ?*anyopaque, dbus.DbusVal) anyerror!void,
+                \\                comptime on_response_callback: ?*const fn(ctx: ?*anyopaque, dbus.Variant) anyerror!void,
                 \\            ) !void {{
                 \\                try self.connection.call(
                 \\                    self.object_path,
@@ -481,13 +481,13 @@ pub fn main() !void {
                 \\                          dbus.DbusString {{ .inner = "{1s}" }},
                 \\                          dbus.DbusString {{ .inner = "{0s}" }},
                 \\                    }},
-                \\                    if (on_response_callback) |c| generateCommonResponseHandler(dbus.DbusVal, on_response_ctx, c) else null,
+                \\                    if (on_response_callback) |c| generateCommonResponseHandler(dbus.Variant, on_response_ctx, c) else null,
                 \\                );
                 \\            }}
                 \\
                 \\            pub fn @"set{0s}Property"(
                 \\                self: Self,
-                \\                val: dbus.DbusVal,
+                \\                val: dbus.Variant,
                 \\            ) !void {{
                 \\                try self.connection.call(
                 \\                    self.object_path,

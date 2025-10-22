@@ -7,8 +7,8 @@ pub fn build(b: *std.Build) !void {
     const sphtud_dep = b.dependency("sphtud", .{});
     const sphtud = sphtud_dep.module("sphtud");
 
-    const dbus_mod = b.addModule("dbus", .{
-        .root_source_file = b.path("src/dbus.zig"),
+    const dbus_mod = b.addModule("sphdbus", .{
+        .root_source_file = b.path("src/sphdbus.zig"),
     });
     dbus_mod.addImport("sphtud", sphtud);
 
@@ -21,7 +21,7 @@ pub fn build(b: *std.Build) !void {
         }),
     });
     example.root_module.addImport("sphtud", sphtud);
-    example.root_module.addImport("dbus", dbus_mod);
+    example.root_module.addImport("sphdbus", dbus_mod);
 
     const generate = b.addExecutable(.{
         .name = "generate",
@@ -40,7 +40,7 @@ pub fn build(b: *std.Build) !void {
     const manager_mod = b.createModule(.{
         .root_source_file = login1_file,
     });
-    manager_mod.addImport("dbus", dbus_mod);
+    manager_mod.addImport("sphdbus", dbus_mod);
     manager_mod.addImport("sphtud", sphtud);
 
     const run_generate_mpris = b.addRunArtifact(generate);
@@ -50,7 +50,7 @@ pub fn build(b: *std.Build) !void {
     const mpris_mod = b.createModule(.{
         .root_source_file = mpris_file,
     });
-    mpris_mod.addImport("dbus", dbus_mod);
+    mpris_mod.addImport("sphdbus", dbus_mod);
     mpris_mod.addImport("sphtud", sphtud);
 
     example.root_module.addImport("login1", manager_mod);

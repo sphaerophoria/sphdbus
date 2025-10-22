@@ -1,7 +1,7 @@
 const std = @import("std");
 const sphtud = @import("sphtud");
 const builtin = @import("builtin");
-const dbus = @import("dbus");
+const dbus = @import("sphdbus");
 const login1 = @import("login1");
 const mpris = @import("mpris");
 
@@ -25,7 +25,7 @@ fn onListUsers(_: ?*anyopaque, response: login1.OrgFreedesktopLogin1Manager.List
     }
 }
 
-fn onVolumeRetrieved(_: ?*anyopaque, response: dbus.DbusVal) !void {
+fn onVolumeRetrieved(_: ?*anyopaque, response: dbus.Variant) !void {
     std.debug.print("volume: {d}\n", .{response.f64});
 }
 
@@ -83,6 +83,10 @@ pub fn main() !void {
     try loop.register(connection.handler());
 
     var called = false;
+    std.debug.print("{s}", .{dbus.generateDbusSignature(struct{
+        dbus.DbusString,
+        dbus.DbusString,
+    })});
 
     //const manager = login1.OrgFreedesktopLogin1Manager.interface(&connection, "org.freedesktop.login1", "/org/freedesktop/login1");
     const player = mpris.OrgMprisMediaPlayer2Player.interface(&connection, "org.mpris.MediaPlayer2.spotify", "/org/mpris/MediaPlayer2");

@@ -10,6 +10,42 @@ fn waitForStartsWith(reader: *std.Io.Reader, start: []const u8, err: anyerror) !
     }
 }
 
+pub fn generateCommonResponseHandler(comptime T: type, ctx: ?*anyopaque, comptime callback: *const fn(ctx: ?*anyopaque, T) anyerror!void) CompletionHandler {
+    const genericCb = struct {
+        fn f(ctx_2: ?*anyopaque, scratch: *sphtud.alloc.BufAllocator, endianness: DbusEndianness, signature: []const u8, body: []const u8) !void {
+            const cp = scratch.checkpoint();
+            defer scratch.restore(cp);
+            const val = try dbusParseBody(T, scratch.allocator(), scratch.backLinear(), endianness, signature, body);
+            try callback(ctx_2, val);
+        }
+    }.f;
+
+    return .{
+        .ctx = ctx,
+        .vtable = &.{
+            .onFinish = genericCb,
+        },
+    };
+}
+
+pub fn generateCommonResponseHandlerVariant(comptime T: type, ctx: ?*anyopaque, comptime callback: *const fn(ctx: ?*anyopaque, T) anyerror!void) CompletionHandler {
+    const genericCb = struct {
+        fn f(ctx_2: ?*anyopaque, scratch: *sphtud.alloc.BufAllocator, endianness: DbusEndianness, signature: []const u8, body: []const u8) !void {
+            const cp = scratch.checkpoint();
+            defer scratch.restore(cp);
+            const val = try dbusParseBody(Variant, scratch.allocator(), scratch.backLinear(), endianness, signature, body);
+            try callback(ctx_2, try val.toConcrete(T));
+        }
+    }.f;
+
+    return .{
+        .ctx = ctx,
+        .vtable = &.{
+            .onFinish = genericCb,
+        },
+    };
+}
+
 pub const SignatureTokenizer = struct {
     reader: *std.Io.Reader,
 
@@ -304,9 +340,52 @@ pub const Variant = union(SignatureTag) {
     f64: f64,
     unknown,
 
+    pub fn toConcrete(self: Variant, comptime T: type) !T {
+        switch (T) {
+            u8 => switch (self) {
+                .byte => |v| return v,
+                else => return error.IncorrectType,
+            },
+            DbusString => switch (self) {
+                .string => |v| return .{ .inner = v },
+                else => return error.IncorrectType,
+            },
+            DbusObject => switch (self) {
+                .object => |v| return .{ .inner = v },
+                else => return error.IncorrectType,
+            },
+            u32 => switch (self) {
+                .u32 => |v| return v,
+                else => return error.IncorrectType,
+            },
+            i64 => switch (self) {
+                .i64 => |v| return v,
+                else => return error.IncorrectType,
+            },
+            f64 => switch (self) {
+                .f64 => |v| return v,
+                else => return error.IncorrectType,
+            },
+            else => return error.UnhandledType,
+        }
+    }
+
+    pub fn fromConcrete(v: anytype) !Variant {
+        switch (@TypeOf(v)) {
+            u8 => return .{ .byte = v },
+            DbusString => return .{ .string = v.inner },
+            DbusObject => return .{ .object = v.inner },
+            u32 => return .{ .u32 = v },
+            i64 => return .{ .i64 = v },
+            f64 => return .{ .f64 = v },
+            else => return error.UnhandledType,
+        }
+    }
+
     pub fn tag(self: Variant) []const u8 {
         return SignatureTag.tag(self);
     }
+
     pub fn size(self: Variant) u32 {
         return switch (self) {
             .empty => 0,

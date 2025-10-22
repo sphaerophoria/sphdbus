@@ -326,28 +326,9 @@ pub fn main() !void {
 
     var f_writer = std.Io.Writer.Allocating.init(root_alloc.allocator());
     try f_writer.writer.writeAll(
-        // FIXME: Better path
         \\const dbus = @import("sphdbus");
         \\const sphtud = @import("sphtud");
         \\const std = @import("std");
-        \\
-        \\fn generateCommonResponseHandler(comptime T: type, ctx: ?*anyopaque, comptime callback: *const fn(ctx: ?*anyopaque, T) anyerror!void) dbus.CompletionHandler {
-        \\    const genericCb = struct {
-        \\        fn f(ctx_2: ?*anyopaque, scratch: *sphtud.alloc.BufAllocator, endianness: dbus.DbusEndianness, signature: []const u8, body: []const u8) !void {
-        \\            const cp = scratch.checkpoint();
-        \\            defer scratch.restore(cp);
-        \\            const val = try dbus.dbusParseBody(T, scratch.allocator(), scratch.backLinear(), endianness, signature, body);
-        \\            try callback(ctx_2, val);
-        \\        }
-        \\    }.f;
-        \\
-        \\    return .{
-        \\        .ctx = ctx,
-        \\        .vtable = &.{
-        \\            .onFinish = genericCb,
-        \\        },
-        \\    };
-        \\}
         \\
         \\
     );
@@ -456,7 +437,7 @@ pub fn main() !void {
 
             try f_writer.writer.print(
                 \\                    }},
-                \\                    if (on_response_callback) |c| generateCommonResponseHandler({s}Response, on_response_ctx, c) else null,
+                \\                    if (on_response_callback) |c| dbus.generateCommonResponseHandler({s}Response, on_response_ctx, c) else null,
                 \\                );
                 \\            }}
                 \\
@@ -470,7 +451,7 @@ pub fn main() !void {
                 \\            pub fn @"get{0s}"(
                 \\                self: Self,
                 \\                on_response_ctx: ?*anyopaque,
-                \\                comptime on_response_callback: ?*const fn(ctx: ?*anyopaque, dbus.Variant) anyerror!void,
+                \\                comptime on_response_callback: ?*const fn(ctx: ?*anyopaque, {2f}) anyerror!void,
                 \\            ) !void {{
                 \\                try self.connection.call(
                 \\                    self.object_path,
@@ -481,13 +462,13 @@ pub fn main() !void {
                 \\                          dbus.DbusString {{ .inner = "{1s}" }},
                 \\                          dbus.DbusString {{ .inner = "{0s}" }},
                 \\                    }},
-                \\                    if (on_response_callback) |c| generateCommonResponseHandler(dbus.Variant, on_response_ctx, c) else null,
+                \\                    if (on_response_callback) |c| dbus.generateCommonResponseHandlerVariant({2f}, on_response_ctx, c) else null,
                 \\                );
                 \\            }}
                 \\
                 \\            pub fn @"set{0s}Property"(
                 \\                self: Self,
-                \\                val: dbus.Variant,
+                \\                val: {2f},
                 \\            ) !void {{
                 \\                try self.connection.call(
                 \\                    self.object_path,
@@ -497,7 +478,7 @@ pub fn main() !void {
                 \\                    .{{
                 \\                          dbus.DbusString {{ .inner = "{1s}" }},
                 \\                          dbus.DbusString {{ .inner = "{0s}" }},
-                \\                          val,
+                \\                          try dbus.Variant.fromConcrete(val),
                 \\                    }},
                 \\                    null,
                 \\                );
@@ -506,6 +487,7 @@ pub fn main() !void {
             , .{
                 property.name,
                 interface.name,
+                dbusToZigType(property.typ),
             });
         }
 

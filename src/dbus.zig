@@ -15,7 +15,8 @@ pub const SignatureTokenizer = struct {
 
     pub const Token = enum {
         array_start,
-        array_end,
+        struct_start,
+        struct_end,
         u32,
         u64,
         i32,
@@ -31,12 +32,9 @@ pub const SignatureTokenizer = struct {
         const b = (try self.takeByte()) orelse return null;
 
         return switch (b) {
-            'a' => {
-                const nb = (try self.takeByte()) orelse return error.InvalidArray;
-                if (nb != '(') return error.InvalidArray;
-                return .array_start;
-            },
-            ')' => return .array_end,
+            'a' => .array_start,
+            '(' => .struct_start,
+            ')' => .struct_end,
             'u' => .u32,
             'i' => .i32,
             't' => .u64,
@@ -544,7 +542,7 @@ pub const DbusConnectionInitializer = struct {
     pub fn init(io_writer: *std.Io.Writer) !DbusConnectionInitializer {
         try io_writer.writeByte(0);
         // FIXME: Base off UID?
-        try io_writer.print("AUTH EXTERNAL 31303031\r\n", .{});
+        try io_writer.print("AUTH EXTERNAL 31303030\r\n", .{});
         try io_writer.flush();
 
         return .{
@@ -668,60 +666,64 @@ fn dbusSerialize(io_writer: *std.Io.Writer, val: anytype) !void {
 }
 
 pub fn dbusParseBodyInner(comptime T: type, alloc: std.mem.Allocator, scratch: sphtud.alloc.LinearAllocator, endianness: DbusEndianness, dr: *DbusMessageReader) !T {
-    var ret: T = undefined;
-    inline for (std.meta.fields(T)) |field| {
-        switch (@typeInfo(field.type)) {
-            .pointer => |pi| {
-                std.debug.assert(pi.size == .slice);
+    switch (T) {
+        DbusObject, DbusString => {
+            const string_len = try dr.readU32(endianness);
+            std.debug.print("string len {d}\n", .{string_len});
+            // Known that string content lives in body, so it's ok
+            const s = try dr.readBytes(string_len);
+            _ = try dr.readBytes(1);
 
-                const array_len_bytes = try dr.readU32(endianness);
-                const start = dr.pos;
-                var builder = try sphtud.util.RuntimeSegmentedListLinearAlloc(pi.child).init(
-                    scratch.allocator(),
-                    scratch.allocator(),
-                    // FIXME: Update guesses
-                    100,
-                    1000,
-                );
-
-                try dr.alignForwards(8);
-
-                while (dr.pos < start + array_len_bytes) {
-                    std.debug.print("at {d}, end at {d}\n", .{ dr.pos, start + array_len_bytes });
-                    try builder.append(try dbusParseBodyInner(pi.child, alloc, scratch, endianness, dr));
-                }
-
-                @field(ret, field.name) = try builder.makeContiguous(alloc);
-                continue;
-            },
-            else => {},
-        }
-
-        switch (field.type) {
-            DbusObject, DbusString => {
-                const string_len = try dr.readU32(endianness);
-                std.debug.print("string len {d}\n", .{string_len});
-                // Known that string content lives in body, so it's ok
-                const s = try dr.readBytes(string_len);
-                _ = try dr.readBytes(1);
-
-                @field(ret, field.name) = .{ .inner = s };
-            },
-            DbusVal => {
-                // Known that string content lives in body, so it's ok to not pass allocator
-                @field(ret, field.name) = try dr.readVariant(null, endianness);
-            },
-            u32 => {
-                @field(ret, field.name) = try dr.readU32(endianness);
-            },
-            f64 => {
-                @field(ret, field.name) = try dr.readF64(endianness);
-            },
-            else => @compileError("Unsupported type " ++ @typeName(field.type)),
-        }
+            return .{ .inner = s };
+        },
+        DbusVal => {
+            // Known that string content lives in body, so it's ok to not pass allocator
+            return try dr.readVariant(null, endianness);
+        },
+        u32 => {
+            return try dr.readU32(endianness);
+        },
+        f64 => {
+            return try dr.readF64(endianness);
+        },
+        else => {},
     }
 
-    return ret;
+    switch (@typeInfo(T)) {
+        .pointer => |pi| {
+            std.debug.assert(pi.size == .slice);
+
+            const array_len_bytes = try dr.readU32(endianness);
+            const start = dr.pos;
+            var builder = try sphtud.util.RuntimeSegmentedListLinearAlloc(pi.child).init(
+                scratch.allocator(),
+                scratch.allocator(),
+                // FIXME: Update guesses
+                100,
+                1000,
+            );
+
+            try dr.alignForwards(8);
+
+            while (dr.pos < start + array_len_bytes) {
+                std.debug.print("at {d}, end at {d}\n", .{ dr.pos, start + array_len_bytes });
+                try builder.append(try dbusParseBodyInner(pi.child, alloc, scratch, endianness, dr));
+            }
+
+            return try builder.makeContiguous(alloc);
+
+        },
+        .@"struct" => |si| {
+            var ret: T = undefined;
+            inline for (si.fields) |field| {
+                @field(ret, field.name) = dbusParseBodyInner(field.type, alloc, scratch, endianness, dr);
+            }
+            return ret;
+        },
+        else => {},
+    }
+
+    @compileError("Unsupported type " ++ @typeName(T));
 }
 
 pub fn dbusParseBody(comptime T: type, alloc: std.mem.Allocator, scratch: sphtud.alloc.LinearAllocator, endianness: DbusEndianness, signature: []const u8, body: []const u8) !T {
@@ -928,30 +930,34 @@ pub const DbusString = struct {
 };
 
 fn generateDbusSignatureInner(comptime T: type) []const u8 {
-    const fields = std.meta.fields(T);
-    var ret: []const u8 = "";
-    for (fields) |field| {
-        switch (@typeInfo(field.type)) {
-            .pointer => |pi| {
-                std.debug.assert(pi.size == .slice);
-
-                ret = ret ++ "a(" ++ generateDbusSignatureInner(pi.child) ++ ")";
-                continue;
-            },
-            else => {},
-        }
-
-        ret = ret ++ switch (field.type) {
-            DbusString => "s",
-            DbusObject => "o",
-            i64 => "x",
-            u32 => "u",
-            DbusVal => "v",
-            f64 => "d",
-            else => @compileError("unimplemented for field type " ++ @typeName(field.type)),
-        };
+    switch (T) {
+        DbusString => return "s",
+        DbusObject => return "o",
+        i64 => return "x",
+        u32 => return "u",
+        DbusVal => return "v",
+        f64 => return "d",
+        else =>  {},
     }
-    return ret;
+
+    switch (@typeInfo(T)) {
+        .pointer => |pi| {
+            std.debug.assert(pi.size == .slice);
+
+            return "a" ++ generateDbusSignatureInner(pi.child);
+        },
+        .@"struct" => |si| {
+            var ret: []const u8 = "(";
+            for (si.fields) |field| {
+                ret = ret ++ generateDbusSignatureInner(field.type);
+            }
+            return ret ++ ")";
+
+        },
+        else => {},
+    }
+
+    @compileError("unimplemented for field type " ++ @typeName(T));
 }
 
 fn generateDbusSignature(comptime T: type) []const u8 {
@@ -961,6 +967,7 @@ fn generateDbusSignature(comptime T: type) []const u8 {
     };
 }
 
+// FIXME: more advanced tests
 test "dbus sig gen" {
     const s = generateDbusSignature(struct {
         x: DbusString,
@@ -971,3 +978,4 @@ test "dbus sig gen" {
 
     try std.testing.expectEqualStrings("soxu\x00", s);
 }
+

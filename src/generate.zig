@@ -193,12 +193,15 @@ const DbusToZigTypeFormatter = struct {
 
             switch (tag) {
                 .array_start => {
+                    try writer.writeAll("[]");
+                },
+                .struct_start => {
                     // upgrade to stack on failure
                     std.debug.assert(in_struct == false);
-                    try writer.writeAll("[]struct { ");
+                    try writer.writeAll("struct {");
                     in_struct = true;
                 },
-                .array_end => {
+                .struct_end => {
                     try writer.writeAll("}");
                     in_struct = false;
                 },
@@ -214,7 +217,7 @@ const DbusToZigTypeFormatter = struct {
             }
 
             switch (tag) {
-                .array_start, .array_end => {},
+                .array_start, .struct_start => {},
                 else => {
                     if (in_struct) {
                         try writer.writeAll(", ");
@@ -467,7 +470,7 @@ pub fn main() !void {
                 \\            pub fn @"get{0s}"(
                 \\                self: Self,
                 \\                on_response_ctx: ?*anyopaque,
-                \\                comptime on_response_callback: ?*const fn(ctx: ?*anyopaque, struct {{ dbus.DbusVal }}) anyerror!void,
+                \\                comptime on_response_callback: ?*const fn(ctx: ?*anyopaque, dbus.DbusVal) anyerror!void,
                 \\            ) !void {{
                 \\                try self.connection.call(
                 \\                    self.object_path,
@@ -478,7 +481,7 @@ pub fn main() !void {
                 \\                          dbus.DbusString {{ .inner = "{1s}" }},
                 \\                          dbus.DbusString {{ .inner = "{0s}" }},
                 \\                    }},
-                \\                    if (on_response_callback) |c| generateCommonResponseHandler( struct {{ dbus.DbusVal }}, on_response_ctx, c) else null,
+                \\                    if (on_response_callback) |c| generateCommonResponseHandler(dbus.DbusVal, on_response_ctx, c) else null,
                 \\                );
                 \\            }}
                 \\
@@ -520,10 +523,10 @@ pub fn main() !void {
 
     const written = f_writer.written();
     const written_sentinel = written[0 .. written.len - 1 :0];
-    //const parsed = try std.zig.Ast.parse(root_alloc.allocator(), written_sentinel, .zig);
+    const parsed = try std.zig.Ast.parse(root_alloc.allocator(), written_sentinel, .zig);
     var out_f = try std.fs.cwd().createFile(output_path, .{});
     var actual_f_writer = out_f.writer(try root_alloc.allocator().alloc(u8, 4096));
-    //try parsed.render(root_alloc.allocator(), &actual_f_writer.interface, .{ });
-    try actual_f_writer.interface.writeAll(written_sentinel);
+    try parsed.render(root_alloc.allocator(), &actual_f_writer.interface, .{ });
+    //try actual_f_writer.interface.writeAll(written_sentinel);
     try actual_f_writer.interface.flush();
 }

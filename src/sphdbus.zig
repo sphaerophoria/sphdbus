@@ -53,6 +53,8 @@ pub const SignatureTokenizer = struct {
         array_start,
         struct_start,
         struct_end,
+        kv_start,
+        kv_end,
         u32,
         u64,
         i32,
@@ -71,6 +73,8 @@ pub const SignatureTokenizer = struct {
             'a' => .array_start,
             '(' => .struct_start,
             ')' => .struct_end,
+            '{' => .kv_start,
+            '}' => .kv_end,
             'u' => .u32,
             'i' => .i32,
             't' => .u64,
@@ -175,18 +179,20 @@ const DbusMessageWriter = struct {
     }
 
     fn writeVariant(self: *DbusMessageWriter, val: Variant) !void {
-        const tag = val.tag();
+        const tag = try val.tag();
         try self.writeVariantTag(tag);
         switch (val) {
             .string, .object => |v| try self.writeStringLike(v),
             .signature => |v| {
-                try self.writeByte(@intCast(v.len - 1));
+                try self.writeByte(@intCast(v.len));
                 try self.writeAll(v);
+                try self.writeByte(0);
             },
             .f64 => |v| try self.writeF64(v),
-            else => unreachable,
+            else => return error.Unimplemented,
         }
     }
+
 
     fn writeStringLike(self: *DbusMessageWriter, s: []const u8) !void {
         const s_len_u32 = std.math.cast(u32, s.len) orelse return error.InvalidLen;
@@ -251,18 +257,27 @@ const DbusMessageReader = struct {
         return try a.dupe(T, val);
     }
 
+    fn readSignature(self: *DbusMessageReader) ![]const u8 {
+        const signature_len = try self.readByte();
+        return (try self.readBytes(signature_len + 1))[0..signature_len];
+    }
+
     fn readVariant(self: *DbusMessageReader, alloc: ?std.mem.Allocator, endianness: DbusEndianness) !Variant {
         if (alloc == null) {
             std.debug.assert(self.reader.vtable == std.Io.Reader.fixed(&.{}).vtable);
         }
 
-        const signature_len = try self.readByte();
-        std.debug.print("Reading sig of len {d}\n", .{signature_len});
-        const signature = try parseSignature(try self.readBytes(signature_len + 1));
+        const signature = try parseSignature(try self.readSignature());
 
         switch (signature) {
-            .empty, .byte => {
-                unreachable;
+            .empty => {
+                return error.Unimplemented;
+            },
+            .byte => {
+                return .{ .byte = try self.readByte() };
+            },
+            .bool => {
+                return .{ .bool = try self.readU32(endianness) > 0 };
             },
             .string => {
                 const string_len = try self.readU32(endianness);
@@ -280,8 +295,7 @@ const DbusMessageReader = struct {
                 return ret;
             },
             .signature => {
-                const string_len = try self.readByte();
-                const s = try self.readBytes(string_len + 1);
+                const s = try self.readSignature();
                 return Variant{ .signature = try dupeIfAlloc(alloc, u8, s) };
             },
             .u32 => {
@@ -308,23 +322,25 @@ const SignatureTag = enum {
     byte,
     string,
     object,
+    bool,
     signature,
     u32,
     i64,
     f64,
     unknown,
 
-    pub fn tag(self: SignatureTag) []const u8 {
+    pub fn tag(self: SignatureTag) ![]const u8 {
         return switch (self) {
-            .empty => unreachable,
+            .empty => "",
             .byte => "y",
             .string => "s",
             .object => "o",
+            .bool => "b",
             .signature => "g",
             .u32 => "u",
             .i64 => "x",
             .f64 => "d",
-            .unknown => unreachable,
+            .unknown => return error.UnknownTag,
         };
     }
 };
@@ -334,6 +350,7 @@ pub const Variant = union(SignatureTag) {
     byte: u8,
     string: []const u8,
     object: []const u8,
+    bool: bool,
     signature: []const u8,
     u32: u32,
     i64: i64,
@@ -382,20 +399,8 @@ pub const Variant = union(SignatureTag) {
         }
     }
 
-    pub fn tag(self: Variant) []const u8 {
+    pub fn tag(self: Variant) ![]const u8 {
         return SignatureTag.tag(self);
-    }
-
-    pub fn size(self: Variant) u32 {
-        return switch (self) {
-            .empty => 0,
-            .byte => 1,
-            .string, .object => |s| @intCast(s.len + 4),
-            .signature => @intCast(self.tag().len + 1), // FIXME: double check
-            .u32 => 4,
-            .i64 => 8,
-            .unknown => unreachable,
-        };
     }
 
     pub fn format(self: Variant, writer: *std.Io.Writer) !void {
@@ -403,6 +408,7 @@ pub const Variant = union(SignatureTag) {
             .empty => {},
             .byte => |v| try writer.print("{d}", .{v}),
             .string => |v| try writer.print("{s}", .{v}),
+            .bool => |v| try writer.print("{}" ,.{v}),
             .object => |v| try writer.print("{s}", .{v}),
             .signature => |v| try writer.print("{s}", .{v}),
             .u32 => |v| try writer.print("{d}", .{v}),
@@ -413,15 +419,15 @@ pub const Variant = union(SignatureTag) {
     }
 };
 
-//FIXME:  feels duplicated with something or otehr
 fn parseSignature(sig: []const u8) !SignatureTag {
-    if (std.mem.eql(u8, "s\x00", sig)) return .string;
-    if (std.mem.eql(u8, "u\x00", sig)) return .u32;
-    if (std.mem.eql(u8, "g\x00", sig)) return .signature;
-    if (std.mem.eql(u8, "o\x00", sig)) return .object;
-    if (std.mem.eql(u8, "\x00", sig)) return .empty;
-    if (std.mem.eql(u8, "x\x00", sig)) return .i64;
-    if (std.mem.eql(u8, "d\x00", sig)) return .f64;
+    if (std.mem.eql(u8, "s", sig)) return .string;
+    if (std.mem.eql(u8, "u", sig)) return .u32;
+    if (std.mem.eql(u8, "g", sig)) return .signature;
+    if (std.mem.eql(u8, "b", sig)) return .bool;
+    if (std.mem.eql(u8, "o", sig)) return .object;
+    if (std.mem.eql(u8, "", sig)) return .empty;
+    if (std.mem.eql(u8, "x", sig)) return .i64;
+    if (std.mem.eql(u8, "d", sig)) return .f64;
     std.log.err("Unimplemented signature: {s} (len {d})", .{ sig, sig.len });
     return .unknown;
 }
@@ -518,7 +524,7 @@ pub const DbusHeader = struct {
 
         const body_signature = generateDbusSignature(@TypeOf(body));
 
-        if (body_signature.len > 1) {
+        if (body_signature.len > 0) {
             try header_fields.appendBounded(.{
                 .typ = .signature,
                 .val = .{
@@ -611,6 +617,44 @@ pub const DbusHeader = struct {
     }
 };
 
+fn numDigits10(val: u32)  u32 {
+    if (val == 0) return 0;
+    return std.math.log10(val) + 1;
+}
+
+test "numDigits10" {
+    try std.testing.expectEqual(3, numDigits10(999));
+    try std.testing.expectEqual(4, numDigits10(1000));
+    try std.testing.expectEqual(4, numDigits10(1001));
+    try std.testing.expectEqual(0, numDigits10(0));
+    try std.testing.expectEqual(1, numDigits10(1));
+}
+
+const AuthUidFormatter = struct {
+    uid: u32,
+
+    pub fn format(self: AuthUidFormatter, writer: *std.Io.Writer) !void {
+        var divisor = std.math.pow(u32, 10, numDigits10(self.uid) - 1);
+        var remaining = self.uid;
+
+        while (divisor > 0) {
+            const digit: u8 = @intCast(remaining / divisor);
+            remaining = self.uid % divisor;
+            try writer.writeByte('3');
+            try writer.writeByte('0' + digit);
+            divisor /= 10;
+        }
+    }
+};
+
+test "AuthUidFormatter" {
+    var buf: [10]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buf);
+    const formatter = AuthUidFormatter {.uid = 1001};
+    try formatter.format(&writer);
+    try std.testing.expectEqualStrings("31303031", writer.buffered());
+}
+
 pub const DbusConnectionInitializer = struct {
     state: enum {
         wait_for_ok,
@@ -620,8 +664,7 @@ pub const DbusConnectionInitializer = struct {
 
     pub fn init(io_writer: *std.Io.Writer) !DbusConnectionInitializer {
         try io_writer.writeByte(0);
-        // FIXME: Base off UID?
-        try io_writer.print("AUTH EXTERNAL 31303031\r\n", .{});
+        try io_writer.print("AUTH EXTERNAL {f}\r\n", .{AuthUidFormatter { .uid = std.posix.getuid() }});
         try io_writer.flush();
 
         return .{
@@ -773,6 +816,7 @@ pub fn dbusParseBodyInner(comptime T: type, alloc: std.mem.Allocator, scratch: s
 
     switch (@typeInfo(T)) {
         .pointer => |pi| {
+            std.debug.print("Found array\n", .{});
             std.debug.assert(pi.size == .slice);
 
             const array_len_bytes = try dr.readU32(endianness);
@@ -785,8 +829,6 @@ pub fn dbusParseBodyInner(comptime T: type, alloc: std.mem.Allocator, scratch: s
                 1000,
             );
 
-            try dr.alignForwards(8);
-
             while (dr.pos < start + array_len_bytes) {
                 std.debug.print("at {d}, end at {d}\n", .{ dr.pos, start + array_len_bytes });
                 try builder.append(try dbusParseBodyInner(pi.child, alloc, scratch, endianness, dr));
@@ -797,8 +839,10 @@ pub fn dbusParseBodyInner(comptime T: type, alloc: std.mem.Allocator, scratch: s
         },
         .@"struct" => |si| {
             var ret: T = undefined;
+            try dr.alignForwards(8);
+            std.debug.print("Found struct\n", .{});
             inline for (si.fields) |field| {
-                @field(ret, field.name) = dbusParseBodyInner(field.type, alloc, scratch, endianness, dr);
+                @field(ret, field.name) = try dbusParseBodyInner(field.type, alloc, scratch, endianness, dr);
             }
             return ret;
         },
@@ -1011,6 +1055,16 @@ pub const DbusString = struct {
     inner: []const u8,
 };
 
+pub fn DbusKV(comptime Key: type, comptime Val: type) type {
+    return struct {
+        // For metaprogramming :)
+        pub const DbusKVFlag = {};
+
+        key: Key,
+        val: Val,
+    };
+}
+
 fn generateDbusSignatureInner(comptime T: type, depth: usize) []const u8 {
     switch (T) {
         DbusString => return "s",
@@ -1029,14 +1083,17 @@ fn generateDbusSignatureInner(comptime T: type, depth: usize) []const u8 {
             return "a" ++ generateDbusSignatureInner(pi.child, depth + 1);
         },
         .@"struct" => |si| {
-            var ret: []const u8 = if (depth == 0) "" else "(";
+            const struct_open = if (@hasDecl(T, "DbusKVFlag")) "{" else "(";
+            const struct_close = if (@hasDecl(T, "DbusKVFlag")) "}" else ")";
+
+            var ret: []const u8 = if (depth == 0) "" else struct_open;
             for (si.fields) |field| {
                 ret = ret ++ generateDbusSignatureInner(field.type, depth + 1);
             }
             if (depth == 0) {
                 return ret;
             } else {
-                return ret ++ ")";
+                return ret ++ struct_close;
             }
         },
         else => {},
@@ -1047,8 +1104,7 @@ fn generateDbusSignatureInner(comptime T: type, depth: usize) []const u8 {
 
 pub fn generateDbusSignature(comptime T: type) []const u8 {
     return comptime blk: {
-        const ret = generateDbusSignatureInner(T, 0);
-        break :blk ret ++ "\x00";
+        break :blk generateDbusSignatureInner(T, 0);
     };
 }
 
@@ -1061,16 +1117,21 @@ test "dbus flat sig gen" {
         u: u32,
     });
 
-    try std.testing.expectEqualStrings("soxu\x00", s);
+    try std.testing.expectEqualStrings("soxu", s);
 }
 
 test "dbus array sig gen" {
     const s = generateDbusSignature([]Variant);
-    try std.testing.expectEqualStrings("av\x00", s);
+    try std.testing.expectEqualStrings("av", s);
 }
 
 test "dbus array struct sig gen" {
     const s = generateDbusSignature([]struct { DbusObject, u32  });
-    try std.testing.expectEqualStrings("a(ou)\x00", s);
+    try std.testing.expectEqualStrings("a(ou)", s);
+}
+
+test "dbus map struct sig gen" {
+    const s = generateDbusSignature([]DbusKV(DbusObject, DbusString));
+    try std.testing.expectEqualStrings("a{os}", s);
 }
 

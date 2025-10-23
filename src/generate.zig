@@ -205,6 +205,16 @@ const DbusToZigTypeFormatter = struct {
                     try writer.writeAll("}");
                     in_struct = false;
                 },
+                .kv_start => {
+                    // upgrade to stack on failure
+                    std.debug.assert(in_struct == false);
+                    try writer.writeAll("dbus.DbusKV(");
+                    in_struct = true;
+                },
+                .kv_end => {
+                    try writer.writeAll(")");
+                    in_struct = false;
+                },
                 .u32 => try writer.writeAll("u32"),
                 .u64 => try writer.writeAll("u64"),
                 .i32 => try writer.writeAll("i32"),
@@ -217,7 +227,7 @@ const DbusToZigTypeFormatter = struct {
             }
 
             switch (tag) {
-                .array_start, .struct_start => {},
+                .array_start, .struct_start, .kv_start => {},
                 else => {
                     if (in_struct) {
                         try writer.writeAll(", ");

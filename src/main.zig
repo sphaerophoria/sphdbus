@@ -31,7 +31,7 @@ fn onVolumeRetrieved(_: ?*anyopaque, response: f64) !void {
 
 fn onPropertiesRetrieved(_: ?*anyopaque, response: login1.OrgFreedesktopDBusProperties.GetAllResponse) !void {
     for (response.props) |prop| {
-        std.debug.print("prop: {s}, {any}\n", .{prop.key.inner, prop.val});
+        std.debug.print("prop: {s}, {any}\n", .{ prop.key.inner, prop.val });
     }
 }
 
@@ -63,27 +63,6 @@ pub fn main() !void {
 
     var connection = try dbus.DbusConnection(sphtud.event.LoopLinear).init(alloc, &scratch, &reader, &writer);
 
-    var msg_reader = std.Io.Reader.fixed(msg);
-
-    const parsed = try dbus.DbusHeader.parse(scratch.allocator(), &msg_reader);
-    std.debug.print("{f}\n", .{parsed});
-    //const params = try dbus.dbusParseBody(GetMessageParams, alloc, scratch.linear(), parsed.endianness, try parsed.signature(), msg_reader.buffered());
-    //std.debug.print("interface name: {s}\n", .{params.interface_name.inner});
-    //std.debug.print("property name: {s}\n", .{params.property_name.inner});
-
-    // endianness: .little
-    // message_type: .call
-    // flags: 0
-    // major_version: .1
-    // body_len: 0
-    // serial: 5
-    // headers
-    //     path: /org/mpris/MediaPlayer2
-    //     destination: org.mpris.MediaPlayer2.spotify
-    //     interface: org.mpris.MediaPlayer2.Player
-    //     member: Play
-    // body:
-
     var loop = try sphtud.event.LoopLinear.init(
         alloc,
         alloc,
@@ -91,14 +70,8 @@ pub fn main() !void {
     try loop.register(connection.handler());
 
     var called = false;
-    std.debug.print("{s}", .{dbus.generateDbusSignature(struct{
-        dbus.DbusString,
-        dbus.DbusString,
-    })});
 
-    //const manager = login1.OrgFreedesktopLogin1Manager.interface(&connection, "org.freedesktop.login1", "/org/freedesktop/login1");
-    //const player = mpris.OrgMprisMediaPlayer2Player.interface(&connection, "org.mpris.MediaPlayer2.spotify", "/org/mpris/MediaPlayer2");
-    const properties = login1.OrgFreedesktopDBusProperties.interface(&connection, "org.mpris.MediaPlayer2.spotify", "/org/mpris/MediaPlayer2");
+    const player = mpris.OrgMprisMediaPlayer2Player.interface(&connection, "org.mpris.MediaPlayer2.spotify", "/org/mpris/MediaPlayer2");
 
     const cp = scratch.checkpoint();
     while (true) {
@@ -107,10 +80,9 @@ pub fn main() !void {
 
         if (!called and connection.state == .ready) {
             called = true;
-            try properties.getAll(
-                .{ .inner = "org.mpris.MediaPlayer2.Player" },
+            try player.playPause(
                 null,
-                onPropertiesRetrieved,
+                null,
             );
         }
     }

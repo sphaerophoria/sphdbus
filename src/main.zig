@@ -61,7 +61,16 @@ pub fn main() !void {
     var reader = socket.reader(try alloc.alloc(u8, 4096));
     var writer = socket.writer(try alloc.alloc(u8, 4096));
 
-    var connection = try dbus.DbusConnection(sphtud.event.LoopLinear).init(alloc, &scratch, &reader, &writer);
+    const OnInitialized = struct {
+        pub fn notify(_: @This(), connection: anytype) !void {
+            const player = mpris.OrgMprisMediaPlayer2Player.interface(connection, "org.mpris.MediaPlayer2.spotify", "/org/mpris/MediaPlayer2");
+            try player.playPause(
+                null,
+                null,
+            );
+        }
+    };
+    var connection = try dbus.dbusConnection(sphtud.event.LoopLinear, alloc, &scratch, &reader, &writer, OnInitialized{});
 
     var loop = try sphtud.event.LoopLinear.init(
         alloc,
@@ -69,21 +78,27 @@ pub fn main() !void {
     );
     try loop.register(connection.handler());
 
-    var called = false;
 
-    const player = mpris.OrgMprisMediaPlayer2Player.interface(&connection, "org.mpris.MediaPlayer2.spotify", "/org/mpris/MediaPlayer2");
+    // Things we do to manually test
+    // * Generate a few interfaces, make sure they compile
+    // * Run a property getter (spotify volume)
+    // * Run a property setter (spotify volume)
+    // * Spotify play pause
+    // * Get list of all users from logind
+    //
+    // Generalizes to...
+    // * Run dbus connection init
+    // * Ensure APIs are generating sane packets
+    // * Test parsing/serialization of various types
+    //
+    // Tests should...
+    // * As much integration testing as is reasonable
+    // * Doesn't rely on external services
+    // * Easily test many types of messages
 
     const cp = scratch.checkpoint();
     while (true) {
         scratch.restore(cp);
         try loop.wait(scratch.linear());
-
-        if (!called and connection.state == .ready) {
-            called = true;
-            try player.playPause(
-                null,
-                null,
-            );
-        }
     }
 }

@@ -9,6 +9,8 @@ pub fn build(b: *std.Build) !void {
 
     const dbus_mod = b.addModule("sphdbus", .{
         .root_source_file = b.path("src/sphdbus.zig"),
+        .target = target,
+        .optimize = optimize,
     });
     dbus_mod.addImport("sphtud", sphtud);
 
@@ -56,6 +58,14 @@ pub fn build(b: *std.Build) !void {
     example.root_module.addImport("login1", manager_mod);
     example.root_module.addImport("mpris", mpris_mod);
 
+    const dbus_tests = b.addTest(.{
+        .name = "dbus_tests",
+        .root_module = dbus_mod,
+    });
+    dbus_tests.root_module.addImport("sphtud", sphtud);
+    dbus_tests.root_module.addImport("mpris", mpris_mod);
+
     b.installArtifact(example);
     b.installArtifact(generate);
+    b.installArtifact(dbus_tests);
 }

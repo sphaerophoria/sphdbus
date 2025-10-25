@@ -863,8 +863,14 @@ pub fn dbusParseBody(comptime T: type, alloc: std.mem.Allocator, scratch: sphtud
 }
 
 
-pub fn dbusConnectionHandler(comptime Loop: type, alloc: std.mem.Allocator, scratch: *sphtud.alloc.BufAllocator, reader: *std.net.Stream.Reader, writer: *std.net.Stream.Writer, on_initialized: anytype) !DbusLoopHandler(Loop, @TypeOf(on_initialized)) {
-    try sphtud.event.setNonblock(reader.getStream().handle);
+pub fn dbusConnectionHandler(comptime Loop: type, alloc: std.mem.Allocator, scratch: *sphtud.alloc.BufAllocator, stream: std.net.Stream, on_initialized: anytype) !DbusLoopHandler(Loop, @TypeOf(on_initialized)) {
+    try sphtud.event.setNonblock(stream.handle);
+
+    const reader = try alloc.create(std.net.Stream.Reader);
+    reader.* = stream.reader(try alloc.alloc(u8, 4096));
+
+    const writer = try alloc.create(std.net.Stream.Writer);
+    writer.* = stream.writer(try alloc.alloc(u8, 4096));
 
     return .{
         .scratch = scratch,
@@ -884,6 +890,9 @@ pub fn dbusConnection( alloc: std.mem.Allocator, writer: *std.Io.Writer, on_init
         .outstanding_requests = try .init(
             alloc,
             alloc,
+            // 16 is a lot if we consider that these should be effectively
+            // instant. 1024 outstanding requests with no response seems very
+            // unreasonable to me
             16,
             1024,
         ),
@@ -951,7 +960,6 @@ pub fn DbusConnection(comptime OnInitializedCtx: type) type {
             initializing: DbusConnectionInitializer,
             ready,
         },
-        // FIXME: This can probably be pulled out as a return action on poll
         on_initialized: OnInitializedCtx,
         outstanding_requests: sphtud.util.AutoHashMapLinear(u32, CompletionHandler),
 
@@ -981,14 +989,14 @@ pub fn DbusConnection(comptime OnInitializedCtx: type) type {
             }
         }
 
-        fn poll(self: *Self, scratch: *sphtud.alloc.BufAllocator, io_reader: *std.Io.Reader, writer: *std.Io.Writer) !void {
+        pub fn poll(self: *Self, scratch: *sphtud.alloc.BufAllocator, io_reader: *std.Io.Reader, writer: *std.Io.Writer) !void {
             sw: switch (self.state) {
                 .initializing => |*initializer| {
                     if (!try initializer.poll(io_reader, writer)) {
                         return;
                     }
                     self.state = .ready;
-                    try self.on_initialized.notify(self);
+                    try self.on_initialized.notify(self, writer);
                     continue :sw self.state;
                 },
                 .ready => {
@@ -998,7 +1006,6 @@ pub fn DbusConnection(comptime OnInitializedCtx: type) type {
         }
 
         fn pollReady(self: *Self, scratch: *sphtud.alloc.BufAllocator, io_reader: *std.Io.Reader) !void {
-            // FIXME: This loop should be part of the handler
             while (true) {
                 // It's easier to parse from a buffer than it is to write
                 // DbusHeader.parse in a way where it doesn't consume bytes from
@@ -1007,7 +1014,6 @@ pub fn DbusConnection(comptime OnInitializedCtx: type) type {
                 // enough data, we can just fill again until we return WouldBlock
                 // here
                 if (io_reader.bufferedLen() == 0) {
-                    // FIXME: This isn't really an error case
                     try io_reader.fillMore();
                 }
 
@@ -1062,7 +1068,7 @@ pub const DbusString = struct {
 pub fn DbusKV(comptime Key: type, comptime Val: type) type {
     return struct {
         // For metaprogramming :)
-        pub const DbusKVFlag = {};
+        pub const DbusKVMarker = {};
 
         key: Key,
         val: Val,
@@ -1087,8 +1093,8 @@ fn generateDbusSignatureInner(comptime T: type, depth: usize) []const u8 {
             return "a" ++ generateDbusSignatureInner(pi.child, depth + 1);
         },
         .@"struct" => |si| {
-            const struct_open = if (@hasDecl(T, "DbusKVFlag")) "{" else "(";
-            const struct_close = if (@hasDecl(T, "DbusKVFlag")) "}" else ")";
+            const struct_open = if (@hasDecl(T, "DbusKVMarker")) "{" else "(";
+            const struct_close = if (@hasDecl(T, "DbusKVMarker")) "}" else ")";
 
             var ret: []const u8 = if (depth == 0) "" else struct_open;
             for (si.fields) |field| {
@@ -1195,23 +1201,56 @@ test "generated interface spotify play pause" {
     const mpris = @import("mpris");
 
     const OnInitialized = struct {
-        fixture: *ConnectionFixture(@This()),
-
-        pub fn notify(self: @This(), connection: anytype) !void {
+        pub fn notify(_: @This(), connection: anytype, w: *std.Io.Writer) !void {
             const interface = mpris.OrgMprisMediaPlayer2Player.interface(connection, "org.mpris.MediaPlayer2.spotify", "/org/mpris/MediaPlayer2");
-            try interface.playPause(&self.fixture.rx.writer, null, null);
+            try interface.playPause(w, null, null);
         }
     };
 
     var fixture: ConnectionFixture(OnInitialized) = undefined;
-    try fixture.initPinned(OnInitialized{ .fixture = &fixture });
+    try fixture.initPinned(OnInitialized{});
 
     // Strace play pause from qdbus on spotify
     const play_pause_message = "\x6c\x01\x00\x01\x00\x00\x00\x00\x02\x00\x00\x00\x82\x00\x00\x00\x01\x01\x6f\x00\x17\x00\x00\x00\x2f\x6f\x72\x67\x2f\x6d\x70\x72\x69\x73\x2f\x4d\x65\x64\x69\x61\x50\x6c\x61\x79\x65\x72\x32\x00\x06\x01\x73\x00\x1e\x00\x00\x00\x6f\x72\x67\x2e\x6d\x70\x72\x69\x73\x2e\x4d\x65\x64\x69\x61\x50\x6c\x61\x79\x65\x72\x32\x2e\x73\x70\x6f\x74\x69\x66\x79\x00\x00\x02\x01\x73\x00\x1d\x00\x00\x00\x6f\x72\x67\x2e\x6d\x70\x72\x69\x73\x2e\x4d\x65\x64\x69\x61\x50\x6c\x61\x79\x65\x72\x32\x2e\x50\x6c\x61\x79\x65\x72\x00\x00\x00\x03\x01\x73\x00\x09\x00\x00\x00\x50\x6c\x61\x79\x50\x61\x75\x73\x65\x00\x00\x00\x00\x00\x00\x00";
     try std.testing.expectEqualSlices(u8, play_pause_message, try fixture.rx_reader.interface.take(play_pause_message.len));
-}
 
-test "generated interface spotify volume property get" {
-    // :) have fun :)
-    unreachable;
+    const interface = mpris.OrgMprisMediaPlayer2Player.interface(&fixture.connection, "org.mpris.MediaPlayer2.spotify", "/org/mpris/MediaPlayer2");
+
+    // Property retrieval
+    {
+        var retrieved_volume: ?f64 = null;
+        try interface.getVolume(&fixture.rx.writer, &retrieved_volume, struct {
+            fn f(ctx: ?*anyopaque, volume: f64) !void {
+                const v: *?f64 = @ptrCast(@alignCast(ctx));
+                v.* = volume;
+            }
+        }.f);
+        try fixture.poll();
+
+        try std.testing.expectEqual(null, retrieved_volume);
+
+        // Validate the request, traced from a working interaction
+        const expected_volume_req = .{ 108, 1, 0, 1, 47, 0, 0, 0, 3, 0, 0, 0, 136, 0, 0, 0, 1, 1, 111, 0, 23, 0, 0, 0, 47, 111, 114, 103, 47, 109, 112, 114, 105, 115, 47, 77, 101, 100, 105, 97, 80, 108, 97, 121, 101, 114, 50, 0, 6, 1, 115, 0, 30, 0, 0, 0, 111, 114, 103, 46, 109, 112, 114, 105, 115, 46, 77, 101, 100, 105, 97, 80, 108, 97, 121, 101, 114, 50, 46, 115, 112, 111, 116, 105, 102, 121, 0, 0, 2, 1, 115, 0, 31, 0, 0, 0, 111, 114, 103, 46, 102, 114, 101, 101, 100, 101, 115, 107, 116, 111, 112, 46, 68, 66, 117, 115, 46, 80, 114, 111, 112, 101, 114, 116, 105, 101, 115, 0, 3, 1, 115, 0, 3, 0, 0, 0, 71, 101, 116, 0, 0, 0, 0, 0, 8, 1, 103, 0, 2, 115, 115, 0, 29, 0, 0, 0, 111, 114, 103, 46, 109, 112, 114, 105, 115, 46, 77, 101, 100, 105, 97, 80, 108, 97, 121, 101, 114, 50, 46, 80, 108, 97, 121, 101, 114, 0, 0, 0, 6, 0, 0, 0, 86, 111, 108, 117, 109, 101, 0 };
+        try std.testing.expectEqualSlices(u8, &expected_volume_req, try fixture.rx_reader.interface.take(expected_volume_req.len));
+
+        // Send the volume response, traced from a working interaction
+        try fixture.tx.writer.writeAll(
+            &.{ 108, 2, 1, 1, 16, 0, 0, 0, 83, 4, 0, 0, 48, 0, 0, 0, 6, 1, 115, 0, 7, 0, 0, 0, 58, 49, 46, 49, 55, 55, 56, 0, 8, 1, 103, 0, 1, 118, 0, 0, 5, 1, 117, 0, 3, 0, 0, 0, 7, 1, 115, 0, 7, 0, 0, 0, 58, 49, 46, 49, 50, 49, 50, 0, 1, 100, 0, 0, 0, 0, 0, 0, 55, 103, 55, 103, 55, 103, 231, 63 },
+        );
+
+        try fixture.poll();
+        // Ensure that our callback was called
+        try std.testing.expectEqual(0.7313496604867628, retrieved_volume);
+    }
+
+    // Property modification
+    {
+        var writer_buf: [4096]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&writer_buf);
+        try interface.setVolumeProperty(&writer, 1.0);
+
+        // Traced from a working interaction
+        const expected_volume_req = .{ 108, 1, 0, 1, 64, 0, 0, 0, 4, 0, 0, 0, 137, 0, 0, 0, 1, 1, 111, 0, 23, 0, 0, 0, 47, 111, 114, 103, 47, 109, 112, 114, 105, 115, 47, 77, 101, 100, 105, 97, 80, 108, 97, 121, 101, 114, 50, 0, 6, 1, 115, 0, 30, 0, 0, 0, 111, 114, 103, 46, 109, 112, 114, 105, 115, 46, 77, 101, 100, 105, 97, 80, 108, 97, 121, 101, 114, 50, 46, 115, 112, 111, 116, 105, 102, 121, 0, 0, 2, 1, 115, 0, 31, 0, 0, 0, 111, 114, 103, 46, 102, 114, 101, 101, 100, 101, 115, 107, 116, 111, 112, 46, 68, 66, 117, 115, 46, 80, 114, 111, 112, 101, 114, 116, 105, 101, 115, 0, 3, 1, 115, 0, 3, 0, 0, 0, 83, 101, 116, 0, 0, 0, 0, 0, 8, 1, 103, 0, 3, 115, 115, 118, 0, 0, 0, 0, 0, 0, 0, 0, 29, 0, 0, 0, 111, 114, 103, 46, 109, 112, 114, 105, 115, 46, 77, 101, 100, 105, 97, 80, 108, 97, 121, 101, 114, 50, 46, 80, 108, 97, 121, 101, 114, 0, 0, 0, 6, 0, 0, 0, 86, 111, 108, 117, 109, 101, 0, 1, 100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 240, 63 };
+        try std.testing.expectEqualSlices(u8, &expected_volume_req, writer.buffered());
+    }
 }

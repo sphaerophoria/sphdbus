@@ -462,10 +462,12 @@ pub fn main() !void {
             try f_writer.writer.print(
                 \\            pub fn @"get{0s}"(
                 \\                self: Self,
+                \\                writer: *std.Io.Writer,
                 \\                on_response_ctx: ?*anyopaque,
                 \\                comptime on_response_callback: ?*const fn(ctx: ?*anyopaque, {2f}) anyerror!void,
                 \\            ) !void {{
                 \\                try self.connection.call(
+                \\                    writer,
                 \\                    self.object_path,
                 \\                    self.service,
                 \\                    "org.freedesktop.DBus.Properties",
@@ -480,9 +482,11 @@ pub fn main() !void {
                 \\
                 \\            pub fn @"set{0s}Property"(
                 \\                self: Self,
+                \\                writer: *std.Io.Writer,
                 \\                val: {2f},
                 \\            ) !void {{
                 \\                try self.connection.call(
+                \\                    writer,
                 \\                    self.object_path,
                 \\                    self.service,
                 \\                    "org.freedesktop.DBus.Properties",

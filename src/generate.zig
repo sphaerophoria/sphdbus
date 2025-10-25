@@ -407,6 +407,7 @@ pub fn main() !void {
             try f_writer.writer.print(
                 \\            pub fn @"{f}"(
                 \\                self: Self,
+                \\                writer: *std.Io.Writer,
                 \\
             , .{pascalToCamel(method.name)});
 
@@ -425,6 +426,7 @@ pub fn main() !void {
                 \\                comptime on_response_callback: ?*const fn(ctx: ?*anyopaque, {0s}Response) anyerror!void,
                 \\            ) !void {{
                 \\                try self.connection.call(
+                \\                    writer,
                 \\                    self.object_path,
                 \\                    self.service,
                 \\                    interface_name_to_serialize,

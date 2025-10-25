@@ -62,15 +62,19 @@ pub fn main() !void {
     var writer = socket.writer(try alloc.alloc(u8, 4096));
 
     const OnInitialized = struct {
-        pub fn notify(_: @This(), connection: anytype) !void {
+        writer: *std.Io.Writer,
+        pub fn notify(self: @This(), connection: anytype) !void {
             const player = mpris.OrgMprisMediaPlayer2Player.interface(connection, "org.mpris.MediaPlayer2.spotify", "/org/mpris/MediaPlayer2");
             try player.playPause(
+                self.writer,
                 null,
                 null,
             );
         }
     };
-    var connection = try dbus.dbusConnection(sphtud.event.LoopLinear, alloc, &scratch, &reader, &writer, OnInitialized{});
+    var connection = try dbus.dbusConnectionHandler(sphtud.event.LoopLinear, alloc, &scratch, &reader, &writer, OnInitialized{
+        .writer = &writer.interface,
+    });
 
     var loop = try sphtud.event.LoopLinear.init(
         alloc,

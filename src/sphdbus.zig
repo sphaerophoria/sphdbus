@@ -863,16 +863,22 @@ pub fn dbusParseBody(comptime T: type, alloc: std.mem.Allocator, scratch: sphtud
 }
 
 
-pub fn dbusConnection(comptime Loop: type, alloc: std.mem.Allocator, scratch: *sphtud.alloc.BufAllocator, reader: *std.net.Stream.Reader, writer: *std.net.Stream.Writer, on_initialized: anytype) !DbusConnection(Loop, @TypeOf(on_initialized)) {
+pub fn dbusConnectionHandler(comptime Loop: type, alloc: std.mem.Allocator, scratch: *sphtud.alloc.BufAllocator, reader: *std.net.Stream.Reader, writer: *std.net.Stream.Writer, on_initialized: anytype) !DbusLoopHandler(Loop, @TypeOf(on_initialized)) {
     try sphtud.event.setNonblock(reader.getStream().handle);
 
     return .{
         .scratch = scratch,
         .writer = writer,
         .reader = reader,
+        .connection = try dbusConnection(alloc, &writer.interface, on_initialized),
+    };
+}
+
+pub fn dbusConnection( alloc: std.mem.Allocator, writer: *std.Io.Writer, on_initialized: anytype) !DbusConnection(@TypeOf(on_initialized)) {
+    return .{
         .serial = 2,
         .state = .{
-            .initializing = try DbusConnectionInitializer.init(&writer.interface),
+            .initializing = try DbusConnectionInitializer.init(writer),
         },
         .on_initialized = on_initialized,
         .outstanding_requests = try .init(
@@ -884,18 +890,12 @@ pub fn dbusConnection(comptime Loop: type, alloc: std.mem.Allocator, scratch: *s
     };
 }
 
-pub fn DbusConnection(comptime Loop: type, comptime OnInitializedCtx: type) type {
+pub fn DbusLoopHandler(comptime Loop: type, comptime OnInitializedCtx: type) type {
     return struct {
         scratch: *sphtud.alloc.BufAllocator,
         reader: *std.net.Stream.Reader,
         writer: *std.net.Stream.Writer,
-        serial: u32,
-        state: union(enum) {
-            initializing: DbusConnectionInitializer,
-            ready,
-        },
-        on_initialized: OnInitializedCtx,
-        outstanding_requests: sphtud.util.AutoHashMapLinear(u32, CompletionHandler),
+        connection: DbusConnection(OnInitializedCtx),
 
         const Self = @This();
 
@@ -914,31 +914,9 @@ pub fn DbusConnection(comptime Loop: type, comptime OnInitializedCtx: type) type
             };
         }
 
-        pub fn call(self: *Self, path: []const u8, destionation: []const u8, interface: []const u8, member: []const u8, body: anytype, on_finish: ?CompletionHandler) !void {
-            var field_buf: [6]HeaderFieldKV = undefined;
-            const to_send = try DbusHeader.call(
-                self.serial,
-                path,
-                destionation,
-                interface,
-                member,
-                body,
-                &field_buf,
-            );
-            // We shouldn't have an outstanding request from 2^32 requests ago
-            self.serial +%= 1;
-
-            try to_send.serialize(&self.writer.interface, body);
-            try self.writer.interface.flush();
-
-            if (on_finish) |h| {
-                try self.outstanding_requests.putNoClobber(to_send.serial, h);
-            }
-        }
-
         fn poll(ctx: ?*anyopaque, _: *Loop, _: sphtud.event.PollReason) Loop.PollResult {
             const self: *Self = @ptrCast(@alignCast(ctx));
-            self.pollError() catch |e| switch (e) {
+            self.connection.poll(self.scratch, self.reader.interface(), &self.writer.interface) catch |e| switch (e) {
                 error.ReadFailed => {
                     if (self.reader.getError()) |reader_err| switch (reader_err) {
                         error.WouldBlock => {
@@ -959,10 +937,54 @@ pub fn DbusConnection(comptime Loop: type, comptime OnInitializedCtx: type) type
             return .in_progress;
         }
 
-        fn pollError(self: *Self) !void {
+        fn close(ctx: ?*anyopaque) void {
+            const self: *Self = @ptrCast(@alignCast(ctx));
+            self.reader.getStream().close();
+        }
+    };
+}
+
+pub fn DbusConnection(comptime OnInitializedCtx: type) type {
+    return struct {
+        serial: u32,
+        state: union(enum) {
+            initializing: DbusConnectionInitializer,
+            ready,
+        },
+        // FIXME: This can probably be pulled out as a return action on poll
+        on_initialized: OnInitializedCtx,
+        outstanding_requests: sphtud.util.AutoHashMapLinear(u32, CompletionHandler),
+
+        const Self = @This();
+
+        pub fn call(self: *Self, writer: *std.Io.Writer, path: []const u8, destionation: []const u8, interface: []const u8, member: []const u8, body: anytype, on_finish: ?CompletionHandler) !void {
+            if (self.state != .ready) return error.Uninitialized;
+
+            var field_buf: [6]HeaderFieldKV = undefined;
+            const to_send = try DbusHeader.call(
+                self.serial,
+                path,
+                destionation,
+                interface,
+                member,
+                body,
+                &field_buf,
+            );
+            // We shouldn't have an outstanding request from 2^32 requests ago
+            self.serial +%= 1;
+
+            try to_send.serialize(writer, body);
+            try writer.flush();
+
+            if (on_finish) |h| {
+                try self.outstanding_requests.putNoClobber(to_send.serial, h);
+            }
+        }
+
+        fn poll(self: *Self, scratch: *sphtud.alloc.BufAllocator, io_reader: *std.Io.Reader, writer: *std.Io.Writer) !void {
             sw: switch (self.state) {
                 .initializing => |*initializer| {
-                    if (!try initializer.poll(self.reader.interface(), &self.writer.interface)) {
+                    if (!try initializer.poll(io_reader, writer)) {
                         return;
                     }
                     self.state = .ready;
@@ -970,13 +992,13 @@ pub fn DbusConnection(comptime Loop: type, comptime OnInitializedCtx: type) type
                     continue :sw self.state;
                 },
                 .ready => {
-                    try self.pollReady();
+                    try self.pollReady(scratch, io_reader);
                 },
             }
         }
 
-        fn pollReady(self: *Self) !void {
-            const io_reader: *std.Io.Reader = self.reader.interface();
+        fn pollReady(self: *Self, scratch: *sphtud.alloc.BufAllocator, io_reader: *std.Io.Reader) !void {
+            // FIXME: This loop should be part of the handler
             while (true) {
                 // It's easier to parse from a buffer than it is to write
                 // DbusHeader.parse in a way where it doesn't consume bytes from
@@ -984,20 +1006,23 @@ pub fn DbusConnection(comptime Loop: type, comptime OnInitializedCtx: type) type
                 // possible, then if the parse fails below because there wasn't
                 // enough data, we can just fill again until we return WouldBlock
                 // here
-                try io_reader.fillMore();
+                if (io_reader.bufferedLen() == 0) {
+                    // FIXME: This isn't really an error case
+                    try io_reader.fillMore();
+                }
 
                 while (true) {
-                    const cp = self.scratch.checkpoint();
-                    defer self.scratch.restore(cp);
+                    const cp = scratch.checkpoint();
+                    defer scratch.restore(cp);
 
                     var tmp_reader = std.Io.Reader.fixed(io_reader.buffered());
 
-                    const message = DbusHeader.parse(self.scratch.allocator(), &tmp_reader) catch |e| switch (e) {
+                    const message = DbusHeader.parse(scratch.allocator(), &tmp_reader) catch |e| switch (e) {
                         error.EndOfStream => break,
                         else => return e,
                     };
 
-                    const body_buf = try self.scratch.allocator().alloc(u8, message.body_len);
+                    const body_buf = try scratch.allocator().alloc(u8, message.body_len);
                     _ = try tmp_reader.readSliceAll(body_buf);
 
                     io_reader.toss(tmp_reader.seek);
@@ -1012,7 +1037,7 @@ pub fn DbusConnection(comptime Loop: type, comptime OnInitializedCtx: type) type
 
                     if (reply_for) |rf| {
                         if (self.outstanding_requests.remove(rf)) |h| {
-                            h.onFinish(self.scratch, message.endianness, try message.signature(), body_buf) catch |e| {
+                            h.onFinish(scratch, message.endianness, try message.signature(), body_buf) catch |e| {
                                 std.log.err("Failed to call handler: {t}", .{e});
                                 if (@errorReturnTrace()) |st| {
                                     std.log.err("stack trace: {f}", .{st});
@@ -1022,11 +1047,6 @@ pub fn DbusConnection(comptime Loop: type, comptime OnInitializedCtx: type) type
                     }
                 }
             }
-        }
-
-        fn close(ctx: ?*anyopaque) void {
-            const self: *Self = @ptrCast(@alignCast(ctx));
-            self.reader.getStream().close();
         }
     };
 }
@@ -1120,61 +1140,38 @@ test "dbus map struct sig gen" {
 
 fn ConnectionFixture(comptime OnInitializedCtx: type) type {
     return struct {
+        // From perspective of fixture holder, invert tx/rx for perspective of
+        // dbus connection
+        tx: sphtud.util.IoPipe,
+        tx_reader: sphtud.util.IoPipe.PipeReader,
+        rx: sphtud.util.IoPipe,
+        rx_reader: sphtud.util.IoPipe.PipeReader,
         alloc_buf: [1 * 1024 * 1024]u8,
         alloc: sphtud.alloc.BufAllocator,
         scratch_buf: [1 * 1024 * 1024]u8,
         scratch: sphtud.alloc.BufAllocator,
-        socket: std.net.Stream,
-        dbus_reader: std.net.Stream.Reader,
-        dbus_writer: std.net.Stream.Writer,
-        connection: DbusConnection(sphtud.event.LoopLinear, OnInitializedCtx),
-        loop: sphtud.event.LoopLinear,
+        connection: DbusConnection(OnInitializedCtx),
 
-        dbus_written: std.net.Stream.Reader,
 
         const Self = @This();
 
         fn initPinned(self: *Self, initializer: OnInitializedCtx) !void {
-            var sockets: [2]std.posix.fd_t = undefined;
-            const ret: isize = @bitCast(std.os.linux.socketpair(
-                std.os.linux.AF.UNIX,
-                std.os.linux.SOCK.STREAM | std.os.linux.SOCK.CLOEXEC | std.os.linux.SOCK.NONBLOCK,
-                0,
-                &sockets,
-            ));
-
-            if (ret < 0) {
-                return error.CreateSockets;
-            }
-
-            self.socket = .{
-                .handle = sockets[1],
-            };
-
-            const dbus_socket = std.net.Stream {
-                .handle = sockets[0],
-            };
-
             self.alloc = sphtud.alloc.BufAllocator.init(&self.alloc_buf);
             self.scratch = sphtud.alloc.BufAllocator.init(&self.scratch_buf);
+            self.tx = sphtud.util.IoPipe.init(try self.alloc.allocator().alloc(u8, 4096));
+            self.tx_reader = self.tx.reader(try self.alloc.allocator().alloc(u8, 4096));
+            self.rx = sphtud.util.IoPipe.init(try self.alloc.allocator().alloc(u8, 4096));
+            self.rx_reader = self.rx.reader(try self.alloc.allocator().alloc(u8, 4096));
 
-            self.dbus_reader = dbus_socket.reader(
-                try self.alloc.allocator().alloc(u8, 4096),
-            );
+            self.connection = try dbusConnection(self.alloc.allocator(), &self.rx.writer, initializer);
 
-            self.dbus_writer = dbus_socket.writer(
-                try self.alloc.allocator().alloc(u8, 4096),
-            );
+            try self.tx.writer.writeAll("OK\r\nAGREE_UNIX_FD\r\n");
+            self.poll() catch {};
+            try validateCommonInitialization(&self.rx_reader.interface);
+        }
 
-            self.connection = try dbusConnection(sphtud.event.LoopLinear, self.alloc.allocator(), &self.scratch, &self.dbus_reader, &self.dbus_writer, initializer);
-            self.dbus_written = self.socket.reader(
-                try self.alloc.allocator().alloc(u8, 4096),
-            );
-            self.loop = try .init(self.alloc.allocator(), self.alloc.allocator());
-            try self.loop.register(self.connection.handler());
-
-            var w = self.socket.writer(&.{});
-            try w.interface.writeAll("OK\r\nAGREE_UNIX_FD\r\nBEGIN\r\n");
+        pub fn poll(self: *Self) !void {
+            try self.connection.poll(&self.scratch, &self.tx_reader.interface, &self.rx.writer);
         }
     };
 
@@ -1190,6 +1187,7 @@ fn validateCommonInitialization(reader: *std.Io.Reader) !void {
     try std.testing.expectEqualSlices(u8, hello_message, try reader.take(hello_message.len));
 }
 
+
 test "generated interface spotify play pause" {
     const mpris = @import("mpris");
 
@@ -1197,25 +1195,17 @@ test "generated interface spotify play pause" {
         fixture: *ConnectionFixture(@This()),
 
         pub fn notify(self: @This(), connection: anytype) !void {
-
             const interface = mpris.OrgMprisMediaPlayer2Player.interface(connection, "org.mpris.MediaPlayer2.spotify", "/org/mpris/MediaPlayer2");
-            try interface.playPause(null, null);
-            self.fixture.loop.shutdown();
+            try interface.playPause(&self.fixture.rx.writer, null, null);
         }
     };
 
     var fixture: ConnectionFixture(OnInitialized) = undefined;
     try fixture.initPinned(OnInitialized{ .fixture = &fixture });
 
-    try fixture.loop.wait(fixture.scratch.linear());
-
-    const reader: *std.Io.Reader = fixture.dbus_written.interface();
-
-    try validateCommonInitialization(reader);
-
-    // Strace play pause from qdbus no spotify
+    // Strace play pause from qdbus on spotify
     const play_pause_message = "\x6c\x01\x00\x01\x00\x00\x00\x00\x02\x00\x00\x00\x82\x00\x00\x00\x01\x01\x6f\x00\x17\x00\x00\x00\x2f\x6f\x72\x67\x2f\x6d\x70\x72\x69\x73\x2f\x4d\x65\x64\x69\x61\x50\x6c\x61\x79\x65\x72\x32\x00\x06\x01\x73\x00\x1e\x00\x00\x00\x6f\x72\x67\x2e\x6d\x70\x72\x69\x73\x2e\x4d\x65\x64\x69\x61\x50\x6c\x61\x79\x65\x72\x32\x2e\x73\x70\x6f\x74\x69\x66\x79\x00\x00\x02\x01\x73\x00\x1d\x00\x00\x00\x6f\x72\x67\x2e\x6d\x70\x72\x69\x73\x2e\x4d\x65\x64\x69\x61\x50\x6c\x61\x79\x65\x72\x32\x2e\x50\x6c\x61\x79\x65\x72\x00\x00\x00\x03\x01\x73\x00\x09\x00\x00\x00\x50\x6c\x61\x79\x50\x61\x75\x73\x65\x00\x00\x00\x00\x00\x00\x00";
-    try std.testing.expectEqualSlices(u8, play_pause_message, try reader.take(play_pause_message.len));
+    try std.testing.expectEqualSlices(u8, play_pause_message, try fixture.rx_reader.interface.take(play_pause_message.len));
 }
 
 test "generated interface spotify volume property get" {

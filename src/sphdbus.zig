@@ -1166,12 +1166,15 @@ fn ConnectionFixture(comptime OnInitializedCtx: type) type {
             self.connection = try dbusConnection(self.alloc.allocator(), &self.rx.writer, initializer);
 
             try self.tx.writer.writeAll("OK\r\nAGREE_UNIX_FD\r\n");
-            self.poll() catch {};
+            try self.poll();
             try validateCommonInitialization(&self.rx_reader.interface);
         }
 
         pub fn poll(self: *Self) !void {
-            try self.connection.poll(&self.scratch, &self.tx_reader.interface, &self.rx.writer);
+            self.connection.poll(&self.scratch, &self.tx_reader.interface, &self.rx.writer) catch |e| {
+                if (e == error.ReadFailed) return;
+                return e;
+            };
         }
     };
 

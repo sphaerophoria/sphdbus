@@ -1,246 +1,10 @@
 const std = @import("std");
 const sphtud = @import("sphtud");
 const dbus = @import("sphdbus.zig");
+const DbusSchemaParser = @import("DbusSchemaParser.zig");
+const helpers = @import("generate_helpers.zig");
 
 // node -> interface -> method
-
-const MethodArg = struct {
-    typ: []const u8,
-    name: []const u8,
-};
-
-const Method = struct {
-    name: []const u8 = "",
-    args: sphtud.util.RuntimeSegmentedListLinearAlloc(MethodArg) = .empty,
-    ret: sphtud.util.RuntimeSegmentedListLinearAlloc(MethodArg) = .empty,
-
-    pub fn init(alloc: std.mem.Allocator, name: []const u8) !Method {
-        return .{
-            .name = try alloc.dupe(u8, name),
-            // FIXME: Update guesses
-            .args = try .init(alloc, alloc, 100, 1000),
-            // FIXME: Update guesses
-            .ret = try .init(alloc, alloc, 100, 1000),
-        };
-    }
-};
-
-const Interface = struct {
-    name: []const u8 = "",
-    methods: sphtud.util.RuntimeSegmentedListLinearAlloc(Method) = .empty,
-    properties: sphtud.util.RuntimeSegmentedListLinearAlloc(Property) = .empty,
-
-    pub fn init(alloc: std.mem.Allocator, name: []const u8) !Interface {
-        return .{
-            .name = try alloc.dupe(u8, name),
-            // FIXME: update guesses,
-            .methods = try .init(alloc, alloc, 100, 10000),
-            .properties = try .init(alloc, alloc, 100, 10000),
-        };
-    }
-};
-
-const Property = struct {
-    name: []const u8 = "",
-    typ: []const u8 = "",
-    access: PropertyAccess = .read,
-
-    const PropertyAccess = enum {
-        read,
-        readwrite,
-    };
-};
-
-const DbusSchemaParser = struct {
-    alloc: std.mem.Allocator,
-    current_interface: Interface = .{},
-    current_method: Method = .{},
-    output: sphtud.util.RuntimeSegmentedListLinearAlloc(Interface),
-    state: enum {
-        default,
-        interface,
-        method,
-    } = .default,
-
-    fn step(self: *DbusSchemaParser, item: sphtud.xml.Item) !void {
-        switch (self.state) {
-            .default => try self.handleDefault(item),
-            .interface => try self.handleInterface(item),
-            .method => try self.handleMethod(item),
-        }
-    }
-
-    fn handleDefault(self: *DbusSchemaParser, item: sphtud.xml.Item) !void {
-        switch (item.type) {
-            .element_start => {
-                if (std.mem.eql(u8, item.name, "interface")) {
-                    self.current_interface = try .init(
-                        self.alloc,
-                        (try item.attributeByKey("name")) orelse return error.NoInterfaceName,
-                    );
-                    self.state = .interface;
-                }
-            },
-            else => {},
-        }
-    }
-
-    fn handleInterface(self: *DbusSchemaParser, item: sphtud.xml.Item) !void {
-        switch (item.type) {
-            .element_start => {
-                if (std.mem.eql(u8, item.name, "method")) {
-                    self.current_method = try .init(
-                        self.alloc,
-                        (try item.attributeByKey("name")) orelse return error.NoMethodName,
-                    );
-                    self.state = .method;
-                }
-
-                if (std.mem.eql(u8, item.name, "property")) {
-                    const name = (try item.attributeByKey("name")) orelse return error.NoPropertyName;
-                    const typ = (try item.attributeByKey("type")) orelse return error.NoPropertyType;
-                    const access_s = (try item.attributeByKey("access")) orelse return error.NoPropertyAccess;
-
-                    const access = std.meta.stringToEnum(Property.PropertyAccess, access_s) orelse return error.UnimplementedAccess;
-                    try self.current_interface.properties.append(.{
-                        .access = access,
-                        .typ = try self.alloc.dupe(u8, typ),
-                        .name = try self.alloc.dupe(u8, name),
-                    });
-                }
-
-                // We do not handle nested interfaces yet
-                std.debug.assert(!std.mem.eql(u8, item.name, "interface"));
-            },
-            .element_end => {
-                // If we see nested interface we will fall over
-                if (std.mem.eql(u8, item.name, "interface")) {
-                    try self.output.append(self.current_interface);
-                    self.current_interface = .{};
-                    self.state = .default;
-                }
-            },
-            else => {},
-        }
-    }
-
-    fn handleMethod(self: *DbusSchemaParser, item: sphtud.xml.Item) !void {
-        switch (item.type) {
-            .element_start => {
-                if (std.mem.eql(u8, item.name, "arg")) {
-                    const dir = try item.attributeByKey("direction") orelse return error.NoDir;
-                    const typ = try self.alloc.dupe(u8, try item.attributeByKey("type") orelse return error.NoType);
-                    const name = try self.alloc.dupe(u8, try item.attributeByKey("name") orelse return error.NoName);
-                    if (std.mem.eql(u8, dir, "in")) {
-                        try self.current_method.args.append(.{
-                            .typ = typ,
-                            .name = name,
-                        });
-                    } else if (std.mem.eql(u8, dir, "out")) {
-                        try self.current_method.ret.append(.{
-                            .typ = typ,
-                            .name = name,
-                        });
-                    }
-                }
-                // We do not handle nested methods yet
-                std.debug.assert(!std.mem.eql(u8, item.name, "method"));
-            },
-            .element_end => {
-                // If we see nested interface we will fall over
-                if (std.mem.eql(u8, item.name, "method")) {
-                    try self.current_interface.methods.append(self.current_method);
-                    self.current_method = .{};
-                    self.state = .interface;
-                }
-            },
-            else => {},
-        }
-    }
-};
-
-const InterfaceTypeNameFormatter = struct {
-    name: []const u8,
-
-    pub fn format(self: InterfaceTypeNameFormatter, writer: *std.Io.Writer) !void {
-        var it = std.mem.splitScalar(u8, self.name, '.');
-        while (it.next()) |segment| {
-            try writer.writeByte(std.ascii.toUpper(segment[0]));
-            try writer.writeAll(segment[1..]);
-        }
-    }
-};
-
-fn interfaceTypeName(name: []const u8) InterfaceTypeNameFormatter {
-    return .{ .name = name };
-}
-
-const DbusToZigTypeFormatter = struct {
-    typ: []const u8,
-
-    pub fn format(self: DbusToZigTypeFormatter, writer: *std.Io.Writer) !void {
-        var reader = std.Io.Reader.fixed(self.typ);
-        var tokenizer = dbus.SignatureTokenizer{
-            .reader = &reader,
-        };
-
-        var in_struct = false;
-
-        while (true) {
-            const tag = tokenizer.next() catch {
-                return error.WriteFailed;
-            } orelse break;
-
-            switch (tag) {
-                .array_start => {
-                    try writer.writeAll("[]");
-                },
-                .struct_start => {
-                    // upgrade to stack on failure
-                    std.debug.assert(in_struct == false);
-                    try writer.writeAll("struct {");
-                    in_struct = true;
-                },
-                .struct_end => {
-                    try writer.writeAll("}");
-                    in_struct = false;
-                },
-                .kv_start => {
-                    // upgrade to stack on failure
-                    std.debug.assert(in_struct == false);
-                    try writer.writeAll("dbus.DbusKV(");
-                    in_struct = true;
-                },
-                .kv_end => {
-                    try writer.writeAll(")");
-                    in_struct = false;
-                },
-                .u32 => try writer.writeAll("u32"),
-                .u64 => try writer.writeAll("u64"),
-                .i32 => try writer.writeAll("i32"),
-                .i64 => try writer.writeAll("i64"),
-                .f64 => try writer.writeAll("f64"),
-                .object => try writer.writeAll("dbus.DbusObject"),
-                .string => try writer.writeAll("dbus.DbusString"),
-                .bool => try writer.writeAll("bool"),
-                .variant => try writer.writeAll("dbus.Variant"),
-            }
-
-            switch (tag) {
-                .array_start, .struct_start, .kv_start => {},
-                else => {
-                    if (in_struct) {
-                        try writer.writeAll(", ");
-                    }
-                },
-            }
-        }
-    }
-};
-
-fn dbusToZigType(typ: []const u8) DbusToZigTypeFormatter {
-    return .{ .typ = typ };
-}
 
 fn isTypeSupported(name: []const u8, typ: []const u8) bool {
     if (typ[0] == 'h') {
@@ -249,7 +13,10 @@ fn isTypeSupported(name: []const u8, typ: []const u8) bool {
     }
 
     var signature_reader = std.Io.Reader.fixed(typ);
-    var tokenizer = dbus.SignatureTokenizer{ .reader = &signature_reader };
+    var tokenizer = dbus.SignatureTokenizer{
+        .reader = &signature_reader,
+        .diagnostics = null,
+    };
     while (true) {
         _ = tokenizer.next() catch {
             std.log.warn("Failed to tokenize signature {s}, skipping method {s}", .{ typ, name });
@@ -260,13 +27,13 @@ fn isTypeSupported(name: []const u8, typ: []const u8) bool {
     return true;
 }
 
-fn isPropertySupported(property: Property) bool {
+fn isPropertySupported(property: DbusSchemaParser.Property) bool {
     if (!isTypeSupported(property.name, property.typ)) return false;
 
     return true;
 }
 
-fn isMethodSupported(method: Method) bool {
+fn isMethodSupported(method: DbusSchemaParser.Method) bool {
     var arg_it = method.args.iter();
     while (arg_it.next()) |arg| {
         if (!isTypeSupported(method.name, arg.typ)) return false;
@@ -278,19 +45,6 @@ fn isMethodSupported(method: Method) bool {
     }
 
     return true;
-}
-
-const PascalToCamelFormatter = struct {
-    val: []const u8,
-
-    pub fn format(self: PascalToCamelFormatter, writer: *std.Io.Writer) !void {
-        try writer.writeByte(std.ascii.toLower(self.val[0]));
-        try writer.writeAll(self.val[1..]);
-    }
-};
-
-fn pascalToCamel(val: []const u8) PascalToCamelFormatter {
-    return .{ .val = val };
 }
 
 const ReservedWords = enum {
@@ -320,16 +74,8 @@ pub fn main() !void {
 
     var content_writer = std.Io.Writer.Discarding.init(&.{});
     var parser = sphtud.xml.Parser.init(&f_reader.interface);
-    var dbus_parser = DbusSchemaParser{
-        .alloc = root_alloc.allocator(),
-        .output = try .init(
-            root_alloc.allocator(),
-            root_alloc.allocator(),
-            // FIXME: Sane guesses please :)
-            100,
-            1000,
-        ),
-    };
+    var dbus_parser = try DbusSchemaParser.init(root_alloc.allocator(), root_alloc.expansion());
+
     while (try parser.next(&content_writer.writer)) |item| {
         try dbus_parser.step(item);
     }
@@ -337,7 +83,6 @@ pub fn main() !void {
     var f_writer = std.Io.Writer.Allocating.init(root_alloc.allocator());
     try f_writer.writer.writeAll(
         \\const dbus = @import("sphdbus");
-        \\const sphtud = @import("sphtud");
         \\const std = @import("std");
         \\
         \\
@@ -348,7 +93,7 @@ pub fn main() !void {
         try f_writer.writer.print(
             \\pub const {f} = struct {{
             \\
-        , .{interfaceTypeName(interface.name)});
+        , .{helpers.interfaceTypeName(interface.name)});
 
         var method_it = interface.methods.iter();
         while (method_it.next()) |method| {
@@ -371,7 +116,7 @@ pub fn main() !void {
                     \\
                 , .{
                     arg.name,
-                    dbusToZigType(arg.typ),
+                    helpers.dbusToZigType(arg.typ),
                 });
             }
 
@@ -382,17 +127,7 @@ pub fn main() !void {
         }
 
         try f_writer.writer.print(
-            \\    pub fn interface(connection: anytype, service: []const u8, object_path: []const u8) Interface(@TypeOf(connection)) {{
-            \\        return .{{
-            \\            .connection = connection,
-            \\            .service = service,
-            \\            .object_path = object_path,
-            \\        }};
-            \\    }}
-            \\
-            \\    pub fn Interface(comptime ConnectionType: type) type {{
-            \\        return struct {{
-            \\            connection: ConnectionType,
+            \\            connection: *dbus.DbusConnection,
             \\            service: []const u8,
             \\            object_path: []const u8,
             \\            const interface_name_to_serialize = "{s}";
@@ -407,9 +142,8 @@ pub fn main() !void {
             try f_writer.writer.print(
                 \\            pub fn @"{f}"(
                 \\                self: Self,
-                \\                writer: *std.Io.Writer,
                 \\
-            , .{pascalToCamel(method.name)});
+            , .{helpers.pascalToCamel(method.name)});
 
             var arg_it = method.args.iter();
             while (arg_it.next()) |arg| {
@@ -418,15 +152,12 @@ pub fn main() !void {
                     \\
                 , .{
                     arg.name,
-                    dbusToZigType(arg.typ),
+                    helpers.dbusToZigType(arg.typ),
                 });
             }
             try f_writer.writer.print(
-                \\                on_response_ctx: ?*anyopaque,
-                \\                comptime on_response_callback: ?*const fn(ctx: ?*anyopaque, {0s}Response) anyerror!void,
-                \\            ) !void {{
-                \\                try self.connection.call(
-                \\                    writer,
+                \\            ) !dbus.CallHandle {{
+                \\                return try self.connection.call(
                 \\                    self.object_path,
                 \\                    self.service,
                 \\                    interface_name_to_serialize,
@@ -449,67 +180,70 @@ pub fn main() !void {
 
             try f_writer.writer.print(
                 \\                    }},
-                \\                    if (on_response_callback) |c| dbus.generateCommonResponseHandler({s}Response, on_response_ctx, c) else null,
                 \\                );
                 \\            }}
                 \\
-            , .{method.name});
+            , .{});
+
+            if (method.ret.len > 0) {
+                // Unimplemented, see parseGetPropertyResponse below
+                unreachable;
+            }
         }
 
         var property_it = interface.properties.iter();
         while (property_it.next()) |property| {
             if (!isPropertySupported(property.*)) continue;
+
             try f_writer.writer.print(
-                \\            pub fn @"get{0s}"(
+                \\            pub fn @"get{[property_name]s}"(
                 \\                self: Self,
-                \\                writer: *std.Io.Writer,
-                \\                on_response_ctx: ?*anyopaque,
-                \\                comptime on_response_callback: ?*const fn(ctx: ?*anyopaque, {2f}) anyerror!void,
-                \\            ) !void {{
-                \\                try self.connection.call(
-                \\                    writer,
+                \\            ) !dbus.CallHandle {{
+                \\                return try self.connection.call(
                 \\                    self.object_path,
                 \\                    self.service,
                 \\                    "org.freedesktop.DBus.Properties",
                 \\                    "Get",
                 \\                    .{{
-                \\                          dbus.DbusString {{ .inner = "{1s}" }},
-                \\                          dbus.DbusString {{ .inner = "{0s}" }},
+                \\                          dbus.DbusString {{ .inner = "{[interface_name]s}" }},
+                \\                          dbus.DbusString {{ .inner = "{[property_name]s}" }},
                 \\                    }},
-                \\                    if (on_response_callback) |c| dbus.generateCommonResponseHandlerVariant({2f}, on_response_ctx, c) else null,
                 \\                );
                 \\            }}
                 \\
-                \\            pub fn @"set{0s}Property"(
+                \\            pub fn @"parseGet{[property_name]s}Response"(
+                \\                message: dbus.ParsedMessage,
+                \\                options: dbus.ParseOptions,
+                \\            ) !{[zig_type]f} {{
+                \\                const v = try dbus.dbusParseBody(dbus.ParseVariant, message, options);
+                \\                return v.toConcrete({[zig_type]f}, message.endianness, options);
+                \\            }}
+                \\
+                \\            pub fn @"set{[property_name]s}Property"(
                 \\                self: Self,
-                \\                writer: *std.Io.Writer,
-                \\                val: {2f},
+                \\                val: {[zig_type]f},
                 \\            ) !void {{
-                \\                try self.connection.call(
-                \\                    writer,
+                \\                _ = try self.connection.call(
                 \\                    self.object_path,
                 \\                    self.service,
                 \\                    "org.freedesktop.DBus.Properties",
                 \\                    "Set",
                 \\                    .{{
-                \\                          dbus.DbusString {{ .inner = "{1s}" }},
-                \\                          dbus.DbusString {{ .inner = "{0s}" }},
-                \\                          try dbus.Variant.fromConcrete(val),
+                \\                          dbus.DbusString {{ .inner = "{[interface_name]s}" }},
+                \\                          dbus.DbusString {{ .inner = "{[property_name]s}" }},
+                \\                          dbus.serializationVariant(val),
                 \\                    }},
-                \\                    null,
                 \\                );
                 \\            }}
                 \\
             , .{
-                property.name,
-                interface.name,
-                dbusToZigType(property.typ),
+                .property_name = property.name,
+                .interface_name = interface.name,
+                .zig_type = helpers.dbusToZigType(property.typ),
             });
         }
 
         try f_writer.writer.writeAll(
-            \\        };
-            \\    }
             \\};
             \\
         );

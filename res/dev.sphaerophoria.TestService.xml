@@ -1,0 +1,16 @@
+<?xml version="1.0" ?>
+<node xmlns:tp="http://telepathy.freedesktop.org/wiki/DbusSpec#extensions-v0">
+  <interface name="dev.sphaerophoria.TestService">
+    <method name="Hello" >
+      <arg direction="in" type="s" name="Name" />
+      <arg direction="out" type="s" name="value" />
+    </method>
+    <method name="Goodbye" >
+      <arg direction="in" type="s" name="Name" />
+      <arg direction="out" type="s" name="value" />
+    </method>
+    <method name="CallMe" >
+      <arg direction="out" type="s" name="value" />
+    </method>
+  </interface>
+</node>

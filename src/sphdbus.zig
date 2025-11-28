@@ -235,6 +235,11 @@ const DbusMessageReader = struct {
     pos: u32,
     reader: *std.Io.Reader,
 
+    fn toss(self: *DbusMessageReader, amount: u32) void {
+        self.pos += amount;
+        self.reader.toss(amount);
+    }
+
     fn readByte(self: *DbusMessageReader) !u8 {
         const ret = try self.reader.takeByte();
         self.pos += 1;
@@ -286,10 +291,8 @@ const DbusMessageReader = struct {
         return (try self.readBytes(len + 1))[0..len];
     }
 
-    fn readVariant(self: *DbusMessageReader, alloc: ?std.mem.Allocator, endianness: DbusEndianness) !Variant {
-        if (alloc == null) {
-            std.debug.assert(self.reader.vtable == std.Io.Reader.fixed(&.{}).vtable);
-        }
+    fn readVariant(self: *DbusMessageReader, endianness: DbusEndianness) !Variant {
+        std.debug.assert(self.reader.vtable == std.Io.Reader.fixed(&.{}).vtable);
 
         const signature = try parseSignature(try self.readSignature());
 
@@ -305,15 +308,15 @@ const DbusMessageReader = struct {
             },
             .string => {
                 const s = try self.readStringLike(endianness);
-                return Variant{ .string = try dupeIfAlloc(alloc, u8, s) };
+                return Variant{ .string = s };
             },
             .object => {
                 const s = try self.readStringLike(endianness);
-                return Variant{ .object = try dupeIfAlloc(alloc, u8, s) };
+                return Variant{ .object = s };
             },
             .signature => {
                 const s = try self.readSignature();
-                return Variant{ .signature = try dupeIfAlloc(alloc, u8, s) };
+                return Variant{ .signature = s };
             },
             .u32 => {
                 const val = try self.readU32(endianness);
@@ -454,19 +457,50 @@ const HeaderFieldKV = struct {
     val: Variant,
 };
 
-pub const DbusHeader = struct {
+const HeaderIt = struct {
+    endianness: DbusEndianness,
+    fixed_reader: std.Io.Reader,
+
+    fn next(self: *HeaderIt) !?HeaderFieldKV {
+        std.debug.assert(self.fixed_reader.vtable == std.Io.Reader.fixed(&.{}).vtable);
+
+        if (self.fixed_reader.seek == self.fixed_reader.buffer.len) {
+            return null;
+        }
+
+        var dbus_reader = DbusMessageReader {
+            .pos = @intCast(self.fixed_reader.seek),
+            .reader = &self.fixed_reader,
+        };
+
+        try dbus_reader.alignForwards(8);
+        const header_field_byte = try dbus_reader.readByte();
+        const header_field = std.meta.intToEnum(HeaderField, header_field_byte) catch return error.InvalidHeaderField;
+
+        const val = try dbus_reader.readVariant(self.endianness);
+
+        return .{
+            .typ = header_field,
+            .val = val,
+        };
+    }
+};
+
+pub const ParsedDbusHeader = struct {
     endianness: DbusEndianness,
     message_type: MsgType,
     flags: u8,
     major_version: DBusVersion,
-    body_len: u32,
     serial: u32,
-    header_fields: []const HeaderFieldKV,
+    header_buf: []const u8,
+    body: []const u8,
+    bytes_consumed: usize,
 
-    pub fn parse(alloc: std.mem.Allocator, io_reader: *std.Io.Reader) !DbusHeader {
+    pub fn parse(buf: []const u8) !ParsedDbusHeader {
+        var io_reader = std.Io.Reader.fixed(buf);
         var dbus_reader = DbusMessageReader{
             .pos = 0,
-            .reader = io_reader,
+            .reader = &io_reader,
         };
 
         const endianness = try std.meta.intToEnum(DbusEndianness, try dbus_reader.readByte());
@@ -479,44 +513,80 @@ pub const DbusHeader = struct {
         const header_field_len = try dbus_reader.readU32(endianness);
 
         const end_header_pos = dbus_reader.pos + header_field_len;
+        try dbus_reader.alignForwards(8);
 
-        var headers_tmp_buf: [100]HeaderFieldKV = undefined;
-        var headers_tmp = std.ArrayList(HeaderFieldKV).initBuffer(&headers_tmp_buf);
+        const header_buf = buf[dbus_reader.pos..end_header_pos];
+
+        var header_it = HeaderIt {
+            .fixed_reader = std.Io.Reader.fixed(header_buf),
+            .endianness = endianness,
+        };
 
         var body_signature: []const u8 = "";
 
-        while (dbus_reader.pos < end_header_pos) {
-            try dbus_reader.alignForwards(8);
-            const header_field_byte = try dbus_reader.readByte();
-            const header_field = std.meta.intToEnum(HeaderField, header_field_byte) catch return error.InvalidHeaderField;
-
-            try headers_tmp.appendBounded(.{
-                .typ = header_field,
-                .val = try dbus_reader.readVariant(alloc, endianness),
-            });
-
-            if (header_field == .signature) {
-                const last_val = headers_tmp.getLast().val;
-                if (last_val != .signature) {
+        while (try header_it.next()) |header| {
+            if (header.typ == .signature) {
+                if (header.val != .signature) {
                     return error.InvalidSignature;
                 }
-                body_signature = last_val.signature;
+                body_signature = header.val.signature;
             }
         }
 
+        dbus_reader.toss(header_field_len);
+
         if (dbus_reader.pos != end_header_pos) return error.InvalidHeader;
         try dbus_reader.alignForwards(8);
+
+        const body = buf[dbus_reader.pos..][0..body_len];
 
         return .{
             .endianness = endianness,
             .message_type = message_type,
             .flags = flags,
             .major_version = major_version,
-            .body_len = body_len,
             .serial = serial,
-            .header_fields = try alloc.dupe(HeaderFieldKV, headers_tmp.items),
+            .header_buf = header_buf,
+            .body = body,
+            .bytes_consumed = dbus_reader.pos + body_len,
         };
     }
+
+    pub fn headerIt(self: *const ParsedDbusHeader) HeaderIt {
+        return .{
+            .endianness = self.endianness,
+            .fixed_reader = std.Io.Reader.fixed(self.header_buf),
+        };
+    }
+
+    pub fn getHeader(self: ParsedDbusHeader, header: HeaderField) !?Variant {
+        var it = self.headerIt();
+        while (try it.next()) |f| {
+            if (f.typ == header) {
+                return f.val;
+            }
+        }
+
+        return null;
+    }
+
+    pub fn signature(self: ParsedDbusHeader) ![]const u8 {
+        const s = try self.getHeader(.signature) orelse return "";
+        switch (s) {
+            .signature => |v| return v,
+            else => return error.InvaliHeader,
+        }
+    }
+};
+
+pub const DbusHeader = struct {
+    endianness: DbusEndianness,
+    message_type: MsgType,
+    flags: u8,
+    major_version: DBusVersion,
+    body_len: u32,
+    serial: u32,
+    header_fields: []const HeaderFieldKV,
 
     pub fn call(serial: u32, path: []const u8, destination: []const u8, interface: []const u8, member: []const u8, body: anytype, field_buf: []HeaderFieldKV) !DbusHeader {
         var header_fields = std.ArrayList(HeaderFieldKV).initBuffer(field_buf);
@@ -612,24 +682,6 @@ pub const DbusHeader = struct {
         try w.print("headers\n", .{});
         for (self.header_fields) |f| {
             try w.print("    {t}: {f}\n", .{ f.typ, f.val });
-        }
-    }
-
-    pub fn getHeader(self: DbusHeader, header: HeaderField) ?Variant {
-        for (self.header_fields) |f| {
-            if (f.typ == header) {
-                return f.val;
-            }
-        }
-
-        return null;
-    }
-
-    pub fn signature(self: DbusHeader) ![]const u8 {
-        const s = self.getHeader(.signature) orelse return "";
-        switch (s) {
-            .signature => |v| return v,
-            else => return error.InvaliHeader,
         }
     }
 };
@@ -817,7 +869,7 @@ pub fn dbusParseBodyInner(comptime T: type, alloc: std.mem.Allocator, scratch: s
         },
         Variant => {
             // Known that string content lives in body, so it's ok to not pass allocator
-            return try dr.readVariant(null, endianness);
+            return try dr.readVariant(endianness);
         },
         u32 => {
             return try dr.readU32(endianness);
@@ -1044,20 +1096,18 @@ pub fn DbusConnection(comptime OnInitializedCtx: type) type {
                     const cp = scratch.checkpoint();
                     defer scratch.restore(cp);
 
-                    var tmp_reader = std.Io.Reader.fixed(io_reader.buffered());
-
-                    const message = DbusHeader.parse(scratch.allocator(), &tmp_reader) catch |e| switch (e) {
+                    const message = ParsedDbusHeader.parse(io_reader.buffered()) catch |e| switch (e) {
                         error.EndOfStream => break,
                         else => return e,
                     };
 
-                    const body_buf = try scratch.allocator().alloc(u8, message.body_len);
-                    _ = try tmp_reader.readSliceAll(body_buf);
+                    const body_buf = message.body;
 
-                    io_reader.toss(tmp_reader.seek);
+                    io_reader.toss(message.bytes_consumed);
 
                     var reply_for: ?u32 = null;
-                    for (message.header_fields) |f| {
+                    var header_it = message.headerIt();
+                    while (try header_it.next()) |f| {
                         if (f.typ == .reply_serial) {
                             if (f.val != .u32) break;
                             reply_for = f.val.u32;

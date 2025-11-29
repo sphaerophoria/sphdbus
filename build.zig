@@ -42,7 +42,6 @@ pub fn build(b: *std.Build) !void {
             .optimize = optimize,
         }),
     });
-    example.use_llvm = true;
     example.root_module.addImport("sphtud", sphtud);
     example.root_module.addImport("sphdbus", dbus_mod);
     example.root_module.addImport("mpris", mpris_mod);

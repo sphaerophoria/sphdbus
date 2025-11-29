@@ -11,31 +11,31 @@ const MethodArg = struct {
 
 const Method = struct {
     name: []const u8 = "",
-    args: sphtud.util.RuntimeSegmentedListLinearAlloc(MethodArg) = .empty,
-    ret: sphtud.util.RuntimeSegmentedListLinearAlloc(MethodArg) = .empty,
+    args: sphtud.util.RuntimeSegmentedList(MethodArg) = .empty,
+    ret: sphtud.util.RuntimeSegmentedList(MethodArg) = .empty,
 
-    pub fn init(alloc: std.mem.Allocator, name: []const u8) !Method {
+    pub fn init(alloc: std.mem.Allocator, expansion_alloc: sphtud.util.ExpansionAlloc, name: []const u8) !Method {
         return .{
             .name = try alloc.dupe(u8, name),
             // FIXME: Update guesses
-            .args = try .init(alloc, alloc, 100, 1000),
+            .args = try .init(alloc, expansion_alloc, 100, 1000),
             // FIXME: Update guesses
-            .ret = try .init(alloc, alloc, 100, 1000),
+            .ret = try .init(alloc, expansion_alloc, 100, 1000),
         };
     }
 };
 
 const Interface = struct {
     name: []const u8 = "",
-    methods: sphtud.util.RuntimeSegmentedListLinearAlloc(Method) = .empty,
-    properties: sphtud.util.RuntimeSegmentedListLinearAlloc(Property) = .empty,
+    methods: sphtud.util.RuntimeSegmentedList(Method) = .empty,
+    properties: sphtud.util.RuntimeSegmentedList(Property) = .empty,
 
-    pub fn init(alloc: std.mem.Allocator, name: []const u8) !Interface {
+    pub fn init(alloc: std.mem.Allocator, expansion_alloc: sphtud.util.ExpansionAlloc, name: []const u8) !Interface {
         return .{
             .name = try alloc.dupe(u8, name),
             // FIXME: update guesses,
-            .methods = try .init(alloc, alloc, 100, 10000),
-            .properties = try .init(alloc, alloc, 100, 10000),
+            .methods = try .init(alloc, expansion_alloc, 100, 10000),
+            .properties = try .init(alloc, expansion_alloc, 100, 10000),
         };
     }
 };
@@ -53,9 +53,10 @@ const Property = struct {
 
 const DbusSchemaParser = struct {
     alloc: std.mem.Allocator,
+    expansion_alloc: sphtud.util.ExpansionAlloc,
     current_interface: Interface = .{},
     current_method: Method = .{},
-    output: sphtud.util.RuntimeSegmentedListLinearAlloc(Interface),
+    output: sphtud.util.RuntimeSegmentedList(Interface),
     state: enum {
         default,
         interface,
@@ -76,6 +77,7 @@ const DbusSchemaParser = struct {
                 if (std.mem.eql(u8, item.name, "interface")) {
                     self.current_interface = try .init(
                         self.alloc,
+                        self.expansion_alloc,
                         (try item.attributeByKey("name")) orelse return error.NoInterfaceName,
                     );
                     self.state = .interface;
@@ -91,6 +93,7 @@ const DbusSchemaParser = struct {
                 if (std.mem.eql(u8, item.name, "method")) {
                     self.current_method = try .init(
                         self.alloc,
+                        self.expansion_alloc,
                         (try item.attributeByKey("name")) orelse return error.NoMethodName,
                     );
                     self.state = .method;
@@ -266,6 +269,17 @@ fn isPropertySupported(property: Property) bool {
     return true;
 }
 
+fn needsAllocation(signature: []const u8) !bool {
+    var signature_reader = std.Io.Reader.fixed(signature);
+    var tokenizer = dbus.SignatureTokenizer{ .reader = &signature_reader };
+    while (try tokenizer.next()) |t| {
+        // Fairly sure the only reason we need allocations is to convert dbus
+        // arrays to zig slices
+        if (t == .array_start) return true;
+    }
+    return false;
+}
+
 fn isMethodSupported(method: Method) bool {
     var arg_it = method.args.iter();
     while (arg_it.next()) |arg| {
@@ -322,9 +336,10 @@ pub fn main() !void {
     var parser = sphtud.xml.Parser.init(&f_reader.interface);
     var dbus_parser = DbusSchemaParser{
         .alloc = root_alloc.allocator(),
+        .expansion_alloc = root_alloc.expansion(),
         .output = try .init(
             root_alloc.allocator(),
-            root_alloc.allocator(),
+            root_alloc.expansion(),
             // FIXME: Sane guesses please :)
             100,
             1000,
@@ -382,17 +397,7 @@ pub fn main() !void {
         }
 
         try f_writer.writer.print(
-            \\    pub fn interface(connection: anytype, service: []const u8, object_path: []const u8) Interface(@TypeOf(connection)) {{
-            \\        return .{{
-            \\            .connection = connection,
-            \\            .service = service,
-            \\            .object_path = object_path,
-            \\        }};
-            \\    }}
-            \\
-            \\    pub fn Interface(comptime ConnectionType: type) type {{
-            \\        return struct {{
-            \\            connection: ConnectionType,
+            \\            connection: *dbus.DbusConnection,
             \\            service: []const u8,
             \\            object_path: []const u8,
             \\            const interface_name_to_serialize = "{s}";
@@ -407,7 +412,6 @@ pub fn main() !void {
             try f_writer.writer.print(
                 \\            pub fn @"{f}"(
                 \\                self: Self,
-                \\                writer: *std.Io.Writer,
                 \\
             , .{pascalToCamel(method.name)});
 
@@ -422,11 +426,8 @@ pub fn main() !void {
                 });
             }
             try f_writer.writer.print(
-                \\                on_response_ctx: ?*anyopaque,
-                \\                comptime on_response_callback: ?*const fn(ctx: ?*anyopaque, {0s}Response) anyerror!void,
-                \\            ) !void {{
-                \\                try self.connection.call(
-                \\                    writer,
+                \\            ) !dbus.DbusConnection.CallHandle {{
+                \\                return try self.connection.call(
                 \\                    self.object_path,
                 \\                    self.service,
                 \\                    interface_name_to_serialize,
@@ -449,67 +450,81 @@ pub fn main() !void {
 
             try f_writer.writer.print(
                 \\                    }},
-                \\                    if (on_response_callback) |c| dbus.generateCommonResponseHandler({s}Response, on_response_ctx, c) else null,
                 \\                );
                 \\            }}
                 \\
-            , .{method.name});
+            , .{});
+
+            if (method.ret.len > 0) {
+                // Unimplemented, see parseGetPropertyResponse below
+                unreachable;
+            }
+
         }
 
         var property_it = interface.properties.iter();
         while (property_it.next()) |property| {
             if (!isPropertySupported(property.*)) continue;
+
+            const needs_allocation = try needsAllocation(property.typ);
+
+            const alloc_params: []const u8, const alloc_passthrough: []const u8 = if (needs_allocation) .{
+                "alloc: std.mem.Allocator, scratch: sphtud.alloc.LinearAllocator, ",
+                "alloc, scratch, "
+            } else .{
+                "",
+                "sphtud.alloc.failing_allocator, sphtud.alloc.failing_linear, ",
+            };
             try f_writer.writer.print(
-                \\            pub fn @"get{0s}"(
+                \\            pub fn @"get{[property_name]s}"(
                 \\                self: Self,
-                \\                writer: *std.Io.Writer,
-                \\                on_response_ctx: ?*anyopaque,
-                \\                comptime on_response_callback: ?*const fn(ctx: ?*anyopaque, {2f}) anyerror!void,
-                \\            ) !void {{
-                \\                try self.connection.call(
-                \\                    writer,
+                \\            ) !dbus.DbusConnection.CallHandle {{
+                \\                return try self.connection.call(
                 \\                    self.object_path,
                 \\                    self.service,
                 \\                    "org.freedesktop.DBus.Properties",
                 \\                    "Get",
                 \\                    .{{
-                \\                          dbus.DbusString {{ .inner = "{1s}" }},
-                \\                          dbus.DbusString {{ .inner = "{0s}" }},
+                \\                          dbus.DbusString {{ .inner = "{[interface_name]s}" }},
+                \\                          dbus.DbusString {{ .inner = "{[property_name]s}" }},
                 \\                    }},
-                \\                    if (on_response_callback) |c| dbus.generateCommonResponseHandlerVariant({2f}, on_response_ctx, c) else null,
                 \\                );
                 \\            }}
                 \\
-                \\            pub fn @"set{0s}Property"(
+                \\            pub fn @"parseGet{[property_name]s}Response"(
+                \\                {[alloc_params]s} message: dbus.ParsedMessage,
+                \\            ) !{[zig_type]f} {{
+                \\                const v = try dbus.dbusParseBody(dbus.Variant, {[alloc_passthrough]s} message);
+                \\                return v.toConcrete({[zig_type]f});
+                \\            }}
+                \\
+                \\            pub fn @"set{[property_name]s}Property"(
                 \\                self: Self,
-                \\                writer: *std.Io.Writer,
-                \\                val: {2f},
+                \\                val: {[zig_type]f},
                 \\            ) !void {{
-                \\                try self.connection.call(
-                \\                    writer,
+                \\                _ = try self.connection.call(
                 \\                    self.object_path,
                 \\                    self.service,
                 \\                    "org.freedesktop.DBus.Properties",
                 \\                    "Set",
                 \\                    .{{
-                \\                          dbus.DbusString {{ .inner = "{1s}" }},
-                \\                          dbus.DbusString {{ .inner = "{0s}" }},
+                \\                          dbus.DbusString {{ .inner = "{[interface_name]s}" }},
+                \\                          dbus.DbusString {{ .inner = "{[property_name]s}" }},
                 \\                          try dbus.Variant.fromConcrete(val),
                 \\                    }},
-                \\                    null,
                 \\                );
                 \\            }}
                 \\
             , .{
-                property.name,
-                interface.name,
-                dbusToZigType(property.typ),
+                .alloc_params = alloc_params,
+                .alloc_passthrough = alloc_passthrough,
+                .property_name = property.name,
+                .interface_name = interface.name,
+                .zig_type = dbusToZigType(property.typ),
             });
         }
 
         try f_writer.writer.writeAll(
-            \\        };
-            \\    }
             \\};
             \\
         );

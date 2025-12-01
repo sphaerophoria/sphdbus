@@ -40,6 +40,7 @@ pub const SignatureTokenizer = struct {
         string,
         bool,
         variant,
+        signature,
     };
 
     pub fn next(self: SignatureTokenizer) !?Token {
@@ -66,6 +67,7 @@ pub const SignatureTokenizer = struct {
             'x' => .i64,
             'v' => .variant,
             'd' => .f64,
+            'g' => .signature,
             else => {
                 std.log.err("Unhandled type {c}", .{b});
                 return error.UnhandledSignature;
@@ -108,7 +110,7 @@ const DBusVersion = enum(u8) {
     @"1" = 1,
 };
 
-const HeaderField = enum(u8) {
+const HeaderFieldTag = enum(u8) {
     path = 1,
     interface = 2,
     member = 3,
@@ -117,6 +119,18 @@ const HeaderField = enum(u8) {
     sender = 7,
     signature = 8,
 };
+
+const DbusWriteError = error {
+    InvalidLen,
+    InvalidSignature,
+} || std.Io.Writer.Error;
+
+const DbusParseError = error {
+    OutOfMemory,
+    UnhandledSignature,
+    InvalidArraySignature,
+    InvalidSignature,
+} || std.Io.Reader.Error;
 
 const DbusMessageWriter = struct {
     pos: u32,
@@ -161,23 +175,9 @@ const DbusMessageWriter = struct {
         self.pos += 1;
     }
 
-    fn writeVariant(self: *DbusMessageWriter, val: Variant) !void {
-        const tag = try val.tag();
-        try self.writeVariantTag(tag);
-        switch (val) {
-            .string, .object => |v| try self.writeStringLike(v),
-            .signature => |v| {
-                try self.writeByte(@intCast(v.len));
-                try self.writeAll(v);
-                try self.writeByte(0);
-            },
-            .f64 => |v| try self.writeF64(v),
-            .u32 => |v| try self.writeU32(v),
-            else => {
-                std.log.err("Unhandled variant: {t}", .{val});
-                return error.Unimplemented;
-            },
-        }
+    fn writeVariant(self: *DbusMessageWriter, val: anytype) DbusWriteError!void {
+        try self.writeVariantTag(generateDbusSignature(@TypeOf(val)));
+        try dbusSerializeInner(self, val);
     }
 
     fn writeStringLike(self: *DbusMessageWriter, s: []const u8) !void {
@@ -199,7 +199,6 @@ const DbusMessageWriter = struct {
 };
 
 const DbusMessageReader = struct {
-    // FIXME: Pos shouldn't be needed if reader is known to be fixed, which I think it is...
     reader: *std.Io.Reader,
 
     fn toss(self: *DbusMessageReader, amount: u32) void {
@@ -256,51 +255,6 @@ const DbusMessageReader = struct {
         return (try self.readBytes(len + 1))[0..len];
     }
 
-    fn readVariant(self: *DbusMessageReader, endianness: DbusEndianness) !Variant {
-        std.debug.assert(self.reader.vtable == std.Io.Reader.fixed(&.{}).vtable);
-
-        const signature = try parseSignature(try self.readSignature());
-
-        switch (signature) {
-            .empty => {
-                return error.Unimplemented;
-            },
-            .byte => {
-                return .{ .byte = try self.readByte() };
-            },
-            .bool => {
-                return .{ .bool = try self.readU32(endianness) > 0 };
-            },
-            .string => {
-                const s = try self.readStringLike(endianness);
-                return Variant{ .string = s };
-            },
-            .object => {
-                const s = try self.readStringLike(endianness);
-                return Variant{ .object = s };
-            },
-            .signature => {
-                const s = try self.readSignature();
-                return Variant{ .signature = s };
-            },
-            .u32 => {
-                const val = try self.readU32(endianness);
-                return .{ .u32 = val };
-            },
-            .i64 => {
-                const val = try self.readI64(endianness);
-                return .{ .i64 = val };
-            },
-            .f64 => {
-                const val = try self.readF64(endianness);
-                return .{ .f64 = val };
-            },
-            .unknown => {
-                return .unknown;
-            },
-        }
-    }
-
     fn readVariant2(self: *DbusMessageReader, endianness: DbusEndianness) !Variant2 {
         std.debug.assert(self.reader.vtable == std.Io.Reader.fixed(&.{}).vtable);
 
@@ -340,7 +294,7 @@ const DbusMessageReader = struct {
                             .u64, .f64, .i64, .kv_start, .struct_start => try self.alignForwards(8),
                             .array_start, .bool, .u32, .i32, .string, .object => try self.alignForwards(4),
                             .kv_end, .struct_end => return error.InvalidArraySignature,
-                            .variant => {},
+                            .signature, .variant => {},
 
                         }
                         self.toss(len_bytes);
@@ -377,13 +331,18 @@ const DbusMessageReader = struct {
                         _ = try self.readVariant2(endianness);
                     }
                 },
+                .signature => {
+                    if (!in_array) {
+                        _ = try self.readSignature();
+                    }
+                },
             }
 
             switch (token) {
                 .struct_end, .kv_end,
                 .bool, .u32, .i32,
                 .u64, .i64, .f64,
-                .object, .string,
+                .object, .string, .signature,
                 .variant => {
                     if (tag_stack.getLastOrNull()) |t| {
                         if (t == .array) {
@@ -450,106 +409,25 @@ pub const Variant2 = struct {
         var dr = DbusMessageReader {
             .reader = &io_reader,
         };
-        dr.toss(self.variant_start + self.signature_len);
+        dr.toss(self.variant_start + self.signature_len + 2);
 
         return dbusParseBodyInner(T, endianness, &dr);
     }
 
 };
 
-pub const Variant = union(SignatureTag) {
-    empty,
-    byte: u8,
-    string: []const u8,
-    object: []const u8,
-    bool: bool,
-    signature: []const u8,
-    u32: u32,
-    i64: i64,
-    f64: f64,
-    unknown,
+pub fn Variant(comptime T: type) type {
+    return struct {
+        // For metaprogramming :)
+        pub const DbusVariantMarker = {};
 
-    pub fn eql(self: Variant, other: Variant) bool {
-        const self_tag: SignatureTag = self;
-        const other_tag: SignatureTag = other;
-        if (self_tag != other_tag) return false;
+        inner: T,
+    };
+}
 
-
-        switch (self_tag) {
-            .byte => return self.byte == other.byte,
-            .string => return std.mem.eql(u8, self.string, other.string),
-            .object => return std.mem.eql(u8, self.object, other.object),
-            .bool => return self.bool == other.bool,
-            .signature => return std.mem.eql(u8, self.signature, other.signature),
-            .u32 => return self.u32 == other.u32,
-            .i64 => return self.i64 == other.i64,
-            .f64 => return self.f64 == other.f64,
-            else => unreachable,
-        }
-    }
-
-    pub fn toConcrete(self: Variant, comptime T: type) !T {
-        switch (T) {
-            u8 => switch (self) {
-                .byte => |v| return v,
-                else => return error.IncorrectType,
-            },
-            DbusString => switch (self) {
-                .string => |v| return .{ .inner = v },
-                else => return error.IncorrectType,
-            },
-            DbusObject => switch (self) {
-                .object => |v| return .{ .inner = v },
-                else => return error.IncorrectType,
-            },
-            u32 => switch (self) {
-                .u32 => |v| return v,
-                else => return error.IncorrectType,
-            },
-            i64 => switch (self) {
-                .i64 => |v| return v,
-                else => return error.IncorrectType,
-            },
-            f64 => switch (self) {
-                .f64 => |v| return v,
-                else => return error.IncorrectType,
-            },
-
-            else => return error.UnhandledType,
-        }
-    }
-
-    pub fn fromConcrete(v: anytype) !Variant {
-        switch (@TypeOf(v)) {
-            u8 => return .{ .byte = v },
-            DbusString => return .{ .string = v.inner },
-            DbusObject => return .{ .object = v.inner },
-            u32 => return .{ .u32 = v },
-            i64 => return .{ .i64 = v },
-            f64 => return .{ .f64 = v },
-            else => return error.UnhandledType,
-        }
-    }
-
-    pub fn tag(self: Variant) ![]const u8 {
-        return SignatureTag.tag(self);
-    }
-
-    pub fn format(self: Variant, writer: *std.Io.Writer) !void {
-        switch (self) {
-            .empty => {},
-            .byte => |v| try writer.print("{d}", .{v}),
-            .string => |v| try writer.print("{s}", .{v}),
-            .bool => |v| try writer.print("{}", .{v}),
-            .object => |v| try writer.print("{s}", .{v}),
-            .signature => |v| try writer.print("{s}", .{v}),
-            .u32 => |v| try writer.print("{d}", .{v}),
-            .i64 => |v| try writer.print("{d}", .{v}),
-            .f64 => |v| try writer.print("{d}", .{v}),
-            .unknown => try writer.print("unknown", .{}),
-        }
-    }
-};
+pub fn makeVariant(val: anytype) Variant(@TypeOf(val)) {
+    return .{ .inner = val };
+}
 
 fn parseSignature(sig: []const u8) !SignatureTag {
     if (std.mem.eql(u8, "s", sig)) return .string;
@@ -564,27 +442,21 @@ fn parseSignature(sig: []const u8) !SignatureTag {
     return .unknown;
 }
 
-const HeaderFieldKV = struct {
-    typ: HeaderField,
-    val: Variant,
+pub const HeaderField = union(HeaderFieldTag) {
+    path: DbusObject,
+    interface: DbusString,
+    member: DbusString,
+    reply_serial: u32,
+    destination: DbusString,
+    sender: DbusString,
+    signature: DbusSignature,
 };
-
 
 const HeaderIt = struct {
     endianness: DbusEndianness,
     fixed_reader: std.Io.Reader,
 
-    const Item = union(HeaderField) {
-        path: DbusObject,
-        interface: DbusString,
-        member: DbusString,
-        reply_serial: u32,
-        destination: DbusString,
-        sender: DbusString,
-        signature: DbusSignature,
-    };
-
-    fn next(self: *HeaderIt) !?Item {
+    fn next(self: *HeaderIt) !?HeaderField {
         std.debug.assert(self.fixed_reader.vtable == std.Io.Reader.fixed(&.{}).vtable);
 
         if (self.fixed_reader.seek == self.fixed_reader.buffer.len) {
@@ -597,12 +469,13 @@ const HeaderIt = struct {
 
         try dbus_reader.alignForwards(8);
         const header_field_byte = try dbus_reader.readByte();
-        const header_field = std.meta.intToEnum(HeaderField, header_field_byte) catch return error.InvalidHeaderField;
+        const header_field = std.meta.intToEnum(HeaderFieldTag, header_field_byte) catch return error.InvalidHeaderField;
 
         switch (header_field)  {
             inline else => |t| {
-                const T = @FieldType(Item, @tagName(t));
-                return @unionInit(Item, @tagName(t), try dbusParseBodyInner(T, self.endianness, &dbus_reader));
+                const T = @FieldType(HeaderField, @tagName(t));
+                const v = try dbusParseBodyInner(Variant2, self.endianness, &dbus_reader);
+                return @unionInit(HeaderField, @tagName(t), try v.toConcrete(T, self.endianness));
             },
         }
     }
@@ -677,7 +550,7 @@ pub const ParsedMessage = struct {
         };
     }
 
-    pub fn getHeader(self: ParsedMessage, comptime header: HeaderField) !?@FieldType(HeaderIt.Item, @tagName(header)) {
+    pub fn getHeader(self: ParsedMessage, comptime header: HeaderFieldTag) !?@FieldType(HeaderField, @tagName(header)) {
         var it = self.headerIt();
         while (try it.next()) |f| {
             if (f == header) {
@@ -701,26 +574,22 @@ pub const DbusHeader = struct {
     major_version: DBusVersion,
     body_len: u32,
     serial: u32,
-    header_fields: []const HeaderFieldKV,
+    header_fields: []const HeaderField,
 
-    pub fn call(serial: u32, path: []const u8, destination: []const u8, interface: []const u8, member: []const u8, body: anytype, field_buf: []HeaderFieldKV) !DbusHeader {
-        var header_fields = std.ArrayList(HeaderFieldKV).initBuffer(field_buf);
+    pub fn call(serial: u32, path: []const u8, destination: []const u8, interface: []const u8, member: []const u8, body: anytype, field_buf: []HeaderField) !DbusHeader {
+        var header_fields = std.ArrayList(HeaderField).initBuffer(field_buf);
         try header_fields.appendSliceBounded(&.{
             .{
-                .typ = .path,
-                .val = .{ .object = path },
+                .path = .{ .inner = path },
             },
             .{
-                .typ = .destination,
-                .val = .{ .string = destination },
+                .destination = .{ .inner = destination },
             },
             .{
-                .typ = .interface,
-                .val = .{ .string = interface },
+                .interface = .{ .inner = interface },
             },
             .{
-                .typ = .member,
-                .val = .{ .string = member },
+                .member = .{ .inner = member },
             },
         });
 
@@ -728,10 +597,7 @@ pub const DbusHeader = struct {
 
         if (body_signature.len > 0) {
             try header_fields.appendBounded(.{
-                .typ = .signature,
-                .val = .{
-                    .signature = body_signature,
-                },
+                .signature = .{ .inner = body_signature },
             });
         }
 
@@ -749,17 +615,15 @@ pub const DbusHeader = struct {
         };
     }
 
-    pub fn ret(serial: u32, reply_serial: u32, destination: []const u8, body: anytype, field_buf: []HeaderFieldKV) !DbusHeader {
+    pub fn ret(serial: u32, reply_serial: u32, destination: []const u8, body: anytype, field_buf: []HeaderField) !DbusHeader {
 
-        var header_fields = std.ArrayList(HeaderFieldKV).initBuffer(field_buf);
+        var header_fields = std.ArrayList(HeaderField).initBuffer(field_buf);
         try header_fields.appendSliceBounded(&.{
             .{
-                .typ = .destination,
-                .val = .{ .string = destination },
+                .destination = .{ .inner = destination },
             },
             .{
-                .typ = .reply_serial,
-                .val = .{ .u32 = reply_serial },
+                .reply_serial = reply_serial,
             },
         });
 
@@ -767,10 +631,7 @@ pub const DbusHeader = struct {
 
         if (body_signature.len > 0) {
             try header_fields.appendBounded(.{
-                .typ = .signature,
-                .val = .{
-                    .signature = body_signature,
-                },
+                .signature = .{ .inner = body_signature },
             });
         }
 
@@ -814,8 +675,10 @@ pub const DbusHeader = struct {
 
         for (self.header_fields) |header_field| {
             try header_field_writer.alignForwards(8); // struct alignment
-            try header_field_writer.writeByte(@intFromEnum(header_field.typ));
-            try header_field_writer.writeVariant(header_field.val);
+            try header_field_writer.writeByte(@intFromEnum(header_field));
+            switch (header_field) {
+                inline else => |v| try header_field_writer.writeVariant(v),
+            }
         }
 
         try w.writeU32(header_field_writer.pos - w.pos - 4); // num headers
@@ -919,22 +782,10 @@ pub const DbusConnectionInitializer = struct {
                     .body_len = 0,
                     .serial = 1,
                     .header_fields = &.{
-                        .{
-                            .typ = .path,
-                            .val = .{ .object = "/org/freedesktop/DBus" },
-                        },
-                        .{
-                            .typ = .destination,
-                            .val = .{ .string = "org.freedesktop.DBus" },
-                        },
-                        .{
-                            .typ = .interface,
-                            .val = .{ .string = "org.freedesktop.DBus" },
-                        },
-                        .{
-                            .typ = .member,
-                            .val = .{ .string = "Hello" },
-                        },
+                        .{ .path = .{ .inner = "/org/freedesktop/DBus"}} ,
+                        .{ .destination =  .{ .inner = "org.freedesktop.DBus" }},
+                        .{ .interface = .{ .inner = "org.freedesktop.DBus" }},
+                        .{ .member = .{ .inner = "Hello" }},
                     },
                 };
                 try hello_message.serialize(io_writer, .{});
@@ -956,6 +807,13 @@ fn dbusSerializeInner(dbus_writer: *DbusMessageWriter, val: anytype) !void {
             try dbus_writer.writeStringLike(val.inner);
             return;
         },
+        DbusSignature => {
+            const len = std.math.cast(u8, val.inner.len) orelse return error.InvalidSignature;
+            try dbus_writer.writeByte(len);
+            try dbus_writer.writeAll(val.inner);
+            try dbus_writer.writeByte(0);
+            return;
+        },
         i64 => {
             try dbus_writer.writeI64(val);
             return;
@@ -968,11 +826,6 @@ fn dbusSerializeInner(dbus_writer: *DbusMessageWriter, val: anytype) !void {
             try dbus_writer.writeF64(val);
             return;
         },
-        // FIXME: Remove variant1
-        Variant => {
-            try dbus_writer.writeVariant(val);
-            return;
-        },
         Variant2 => {
             unreachable;
         },
@@ -981,9 +834,13 @@ fn dbusSerializeInner(dbus_writer: *DbusMessageWriter, val: anytype) !void {
 
     switch (@typeInfo(@TypeOf(val))) {
         .@"struct" => |si| {
-            try dbus_writer.alignForwards(8);
-            inline for (si.fields) |field| {
-                try dbusSerializeInner(dbus_writer, @field(val, field.name));
+            if (@hasDecl(@TypeOf(val), "DbusVariantMarker")) {
+                try dbus_writer.writeVariant(val.inner);
+            } else {
+                try dbus_writer.alignForwards(8);
+                inline for (si.fields) |field| {
+                    try dbusSerializeInner(dbus_writer, @field(val, field.name));
+                }
             }
             return;
         },
@@ -1005,7 +862,7 @@ fn dbusSerialize(io_writer: *std.Io.Writer, val: anytype) !void {
 fn getDbusAlignment(comptime T: type) u32 {
     switch (T) {
         u32, i32, DbusObject, DbusString => return 4,
-        Variant, Variant2 => return 1,
+        Variant2 => return 1,
         u64, f64, i64 => return 8,
         else => {},
     }
@@ -1021,7 +878,7 @@ fn getDbusAlignment(comptime T: type) u32 {
     @compileError("Unknown alignment for " ++ @typeName(T));
 }
 
-pub fn dbusParseBodyInner(comptime T: type, endianness: DbusEndianness, dr: *DbusMessageReader) !T {
+pub fn dbusParseBodyInner(comptime T: type, endianness: DbusEndianness, dr: *DbusMessageReader) DbusParseError!T {
     switch (T) {
         DbusObject, DbusString => {
             const string_len = try dr.readU32(endianness);
@@ -1033,10 +890,6 @@ pub fn dbusParseBodyInner(comptime T: type, endianness: DbusEndianness, dr: *Dbu
         },
         DbusSignature => {
             return .{ .inner = try dr.readSignature() };
-        },
-        Variant => {
-            // Known that string content lives in body, so it's ok to not pass allocator
-            return try dr.readVariant(endianness);
         },
         Variant2 => {
             return try dr.readVariant2(endianness);
@@ -1131,7 +984,7 @@ pub const DbusConnection = struct {
         pub fn call(self: *Self, path: []const u8, destination: []const u8, interface: []const u8, member: []const u8, body: anytype) !CallHandle {
             if (self.state != .ready) return error.Uninitialized;
 
-            var field_buf: [6]HeaderFieldKV = undefined;
+            var field_buf: [6]HeaderField = undefined;
             const to_send = try DbusHeader.call(
                 self.serial,
                 path,
@@ -1154,7 +1007,7 @@ pub const DbusConnection = struct {
         pub fn ret(self: *DbusConnection, reply_serial: u32, destination: []const u8, body: anytype) !void {
             if (self.state != .ready) return error.Uninitialized;
 
-            var field_buf: [6]HeaderFieldKV = undefined;
+            var field_buf: [6]HeaderField = undefined;
             const to_send = try DbusHeader.ret(
                 self.serial,
                 reply_serial,
@@ -1308,11 +1161,11 @@ fn generateDbusSignatureInner(comptime T: type, depth: usize) []const u8 {
     switch (T) {
         DbusString => return "s",
         DbusObject => return "o",
+        DbusSignature => return "g",
         i64 => return "x",
         u32 => return "u",
         i32 => return "i",
         u64 => return "t",
-        Variant => return "v",
         Variant2 => return "v",
         f64 => return "d",
         else => {},
@@ -1327,6 +1180,9 @@ fn generateDbusSignatureInner(comptime T: type, depth: usize) []const u8 {
         .@"struct" => |si| {
             if (@hasDecl(T, "DbusArrayMarker")) {
                 return "a" ++ generateDbusSignatureInner(T.T, depth + 1);
+            }
+            if (@hasDecl(T, "DbusVariantMarker")) {
+                return "v";
             }
             const struct_open = if (@hasDecl(T, "DbusKVMarker")) "{" else "(";
             const struct_close = if (@hasDecl(T, "DbusKVMarker")) "}" else ")";
@@ -1365,7 +1221,7 @@ test "dbus flat sig gen" {
 }
 
 test "dbus array sig gen" {
-    const s = generateDbusSignature([]Variant);
+    const s = generateDbusSignature([]Variant(u32));
     try std.testing.expectEqualStrings("av", s);
 }
 
@@ -1454,6 +1310,11 @@ test "generated interface spotify play pause" {
                 .initialized, .call, .none => {},
                 .response => |params| {
                     if (params.handle.inner == volume_handle.inner) {
+                        var it = params.header.headerIt();
+                        while (try it.next()) |v| {
+                            std.debug.print("{any}\n", .{v});
+
+                        }
                         break :blk try mpris.OrgMprisMediaPlayer2Player.parseGetVolumeResponse(params.header);
                     }
                 }

@@ -234,6 +234,7 @@ const DbusToZigTypeFormatter = struct {
                 .string => try writer.writeAll("dbus.DbusString"),
                 .bool => try writer.writeAll("bool"),
                 .variant => try writer.writeAll("dbus.Variant2"),
+                .signature => try writer.writeAll("dbus.DbusSignature"),
             }
 
             switch (tag) {
@@ -511,7 +512,7 @@ pub fn main() !void {
                 \\                    .{{
                 \\                          dbus.DbusString {{ .inner = "{[interface_name]s}" }},
                 \\                          dbus.DbusString {{ .inner = "{[property_name]s}" }},
-                \\                          try dbus.Variant.fromConcrete(val),
+                \\                          dbus.makeVariant(val),
                 \\                    }},
                 \\                );
                 \\            }}

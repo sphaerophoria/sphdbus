@@ -60,6 +60,7 @@ pub fn build(b: *std.Build) !void {
         .name = "dbus_tests",
         .root_module = dbus_mod,
     });
+    dbus_tests.use_llvm = true;
     dbus_tests.root_module.addImport("sphtud", sphtud);
     dbus_tests.root_module.addImport("mpris", mpris_mod);
 

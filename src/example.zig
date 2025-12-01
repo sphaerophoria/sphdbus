@@ -48,6 +48,11 @@ const DbusHandler = struct {
                     if (res != .response) continue;
                     if (res.response.handle.inner != wait_for.inner) continue;
 
+                    const f = try std.fs.cwd().createFile("dump.bin", .{});
+                    defer f.close();
+
+                    try f.writeAll(res.response.header.body);
+
                     const parsed = try mpris.OrgMprisMediaPlayer2Player.parseGetMetadataResponse(
                         res.response.header,
                     );

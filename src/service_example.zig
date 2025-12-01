@@ -30,6 +30,9 @@ const DbusHandlerError = error {
     InvalidLen,
     Uninitialized,
     InvalidCall,
+    InvalidSignature,
+    UnhandledSignature,
+    InvalidArraySignature,
 } || std.Io.Writer.Error || std.Io.Reader.Error;
 
 const ExpectedObjectPath = enum {

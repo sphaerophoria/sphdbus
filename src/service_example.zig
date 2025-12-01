@@ -14,7 +14,6 @@ fn waitForResponse(connection: *dbus.DbusConnection, handle: dbus.DbusConnection
 
         if (response.handle.inner == handle.inner) break;
     }
-
 }
 
 
@@ -55,11 +54,11 @@ fn handleIntrospectionOnlyPath(message: dbus.ParsedMessage, path: ExpectedObject
     const member = try message.getHeader(.member) orelse return error.InvalidCall;
     const interface = try message.getHeader(.interface) orelse return error.InvalidCall;
 
-    if (!interface.eql(.{ .string = "org.freedesktop.DBus.Introspectable" })) {
+    if (!std.mem.eql(u8, interface.inner, "org.freedesktop.DBus.Introspectable" )) {
         return error.Unimplemented;
     }
 
-    if (!member.eql(.{ .string = "Introspect" })) {
+    if (!std.mem.eql(u8, member.inner, "Introspect" )) {
         return error.Unimplemented;
     }
 
@@ -74,7 +73,7 @@ fn handleIntrospectionOnlyPath(message: dbus.ParsedMessage, path: ExpectedObject
     , .{path.child()});
 
     // FIXME: Crashy crashy crashy
-    const sender = (try message.getHeader(.sender)).?.string;
+    const sender = (try message.getHeader(.sender)).?.inner;
 
     try connection.ret(message.serial, sender, .{
         dbus.DbusString { .inner = writer.buffered() },
@@ -84,7 +83,7 @@ fn handleIntrospectionOnlyPath(message: dbus.ParsedMessage, path: ExpectedObject
 fn writeResponse(message: dbus.ParsedMessage, connection: *dbus.DbusConnection) DbusHandlerError!void {
     const path = (try message.getHeader(.path)) orelse return error.NoPath;
     // FIXME: Crashy crashy
-    const parsed_path = std.meta.stringToEnum(ExpectedObjectPath, path.object) orelse return error.UnexpectedPath;
+    const parsed_path = std.meta.stringToEnum(ExpectedObjectPath, path.inner) orelse return error.UnexpectedPath;
 
     switch (parsed_path) {
         .@"/", .@"/dev", .@"/dev/sphaerophoria" => try handleIntrospectionOnlyPath(message, parsed_path, connection),
@@ -95,33 +94,30 @@ fn writeResponse(message: dbus.ParsedMessage, connection: *dbus.DbusConnection) 
             };
 
             const interface = (try message.getHeader(.interface)) orelse return error.InvalidCall;
-            if (interface != .string) return error.InvalidCall;
-
             const member = try message.getHeader(.member) orelse return error.InvalidCall;
 
-            const parsed_interface = std.meta.stringToEnum(Interface, interface.string) orelse return error.Unimplemented;
+            const parsed_interface = std.meta.stringToEnum(Interface, interface.inner) orelse return error.Unimplemented;
             switch (parsed_interface) {
                 .@"org.freedesktop.DBus.Introspectable" => {
-                    if (!member.eql(.{ .string = "Introspect" })) {
+                    if (!std.mem.eql(u8, member.inner, "Introspect")) {
                         return error.Unimplemented;
                     }
 
                     // FIXME: Crashy crashy crashy
-                    const sender = (try message.getHeader(.sender)).?.string;
+                    const sender = (try message.getHeader(.sender)).?;
 
-                    try connection.ret(message.serial, sender, .{
+                    try connection.ret(message.serial, sender.inner, .{
                         dbus.DbusString { .inner = api },
                     });
 
                 },
                 .@"dev.sphaerophoria.TestService" => {
-                    if (member != .string) return error.InvalidCall;
-                    if (!std.mem.eql(u8, member.string, "Hello")) {
+                    if (!std.mem.eql(u8, member.inner, "Hello")) {
                         return error.Unimplemented;
                     }
 
                     // FIXME: Crashy crashy crashy
-                    const sender = (try message.getHeader(.sender)).?.string;
+                    const sender = (try message.getHeader(.sender)).?.inner;
 
                     try connection.ret(message.serial, sender, .{
                         dbus.DbusString { .inner = "Hello from dbus service" },

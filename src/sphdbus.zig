@@ -200,31 +200,23 @@ const DbusMessageWriter = struct {
 
 const DbusMessageReader = struct {
     // FIXME: Pos shouldn't be needed if reader is known to be fixed, which I think it is...
-    pos: u32,
     reader: *std.Io.Reader,
 
     fn toss(self: *DbusMessageReader, amount: u32) void {
-        self.pos += amount;
         self.reader.toss(amount);
     }
 
     fn readByte(self: *DbusMessageReader) !u8 {
-        const ret = try self.reader.takeByte();
-        self.pos += 1;
-        return ret;
+        return try self.reader.takeByte();
     }
 
     fn readBytes(self: *DbusMessageReader, n: u32) ![]const u8 {
-        const ret = try self.reader.take(n);
-        self.pos += n;
-        return ret;
+        return try self.reader.take(n);
     }
 
     fn readU32(self: *DbusMessageReader, endianness: DbusEndianness) !u32 {
         try self.alignForwards(4);
-        const ret = try self.reader.takeInt(u32, endianness.toBuiltin());
-        self.pos += 4;
-        return ret;
+        return try self.reader.takeInt(u32, endianness.toBuiltin());
     }
 
     fn readI32(self: *DbusMessageReader, endianness: DbusEndianness) !i32 {
@@ -233,9 +225,7 @@ const DbusMessageReader = struct {
 
     fn readU64(self: *DbusMessageReader, endianness: DbusEndianness) !u64 {
         try self.alignForwards(8);
-        const ret = try self.reader.takeInt(u64, endianness.toBuiltin());
-        self.pos += 8;
-        return ret;
+        return try self.reader.takeInt(u64, endianness.toBuiltin());
     }
 
     fn readF64(self: *DbusMessageReader, endianness: DbusEndianness) !f64 {
@@ -247,9 +237,8 @@ const DbusMessageReader = struct {
     }
 
     fn alignForwards(self: *DbusMessageReader, alignment: u32) !void {
-        const new_pos = std.mem.alignForward(u32, self.pos, alignment);
-        try self.reader.discardAll(new_pos - self.pos);
-        self.pos = new_pos;
+        const new_pos = std.mem.alignForward(usize, self.reader.seek, alignment);
+        try self.reader.discardAll(new_pos - self.reader.seek);
     }
 
     fn dupeIfAlloc(alloc: ?std.mem.Allocator, comptime T: type, val: []const T) ![]const T {
@@ -315,11 +304,6 @@ const DbusMessageReader = struct {
     fn readVariant2(self: *DbusMessageReader, endianness: DbusEndianness) !Variant2 {
         std.debug.assert(self.reader.vtable == std.Io.Reader.fixed(&.{}).vtable);
 
-        // FIXME: I think struct alignment won't work if this isn't true, but
-        // unsure, we should check
-        //std.debug.assert(self.pos % 8 == 0);
-
-        // Skip signature len
         const data_start = self.reader.seek;
 
         const signature_s = try self.readSignature();
@@ -464,7 +448,6 @@ pub const Variant2 = struct {
 
         var io_reader = std.Io.Reader.fixed(self.data);
         var dr = DbusMessageReader {
-            .pos = 0,
             .reader = &io_reader,
         };
         dr.toss(self.variant_start + self.signature_len);
@@ -472,10 +455,6 @@ pub const Variant2 = struct {
         return dbusParseBodyInner(T, endianness, &dr);
     }
 
-    pub fn fromConcrete(v: anytype) !Variant2 {
-        _ = v;
-        unreachable;
-    }
 };
 
 pub const Variant = union(SignatureTag) {
@@ -590,11 +569,22 @@ const HeaderFieldKV = struct {
     val: Variant,
 };
 
+
 const HeaderIt = struct {
     endianness: DbusEndianness,
     fixed_reader: std.Io.Reader,
 
-    fn next(self: *HeaderIt) !?HeaderFieldKV {
+    const Item = union(HeaderField) {
+        path: DbusObject,
+        interface: DbusString,
+        member: DbusString,
+        reply_serial: u32,
+        destination: DbusString,
+        sender: DbusString,
+        signature: DbusSignature,
+    };
+
+    fn next(self: *HeaderIt) !?Item {
         std.debug.assert(self.fixed_reader.vtable == std.Io.Reader.fixed(&.{}).vtable);
 
         if (self.fixed_reader.seek == self.fixed_reader.buffer.len) {
@@ -602,7 +592,6 @@ const HeaderIt = struct {
         }
 
         var dbus_reader = DbusMessageReader {
-            .pos = @intCast(self.fixed_reader.seek),
             .reader = &self.fixed_reader,
         };
 
@@ -610,12 +599,12 @@ const HeaderIt = struct {
         const header_field_byte = try dbus_reader.readByte();
         const header_field = std.meta.intToEnum(HeaderField, header_field_byte) catch return error.InvalidHeaderField;
 
-        const val = try dbus_reader.readVariant(self.endianness);
-
-        return .{
-            .typ = header_field,
-            .val = val,
-        };
+        switch (header_field)  {
+            inline else => |t| {
+                const T = @FieldType(Item, @tagName(t));
+                return @unionInit(Item, @tagName(t), try dbusParseBodyInner(T, self.endianness, &dbus_reader));
+            },
+        }
     }
 };
 
@@ -632,7 +621,6 @@ pub const ParsedMessage = struct {
     pub fn parse(buf: []const u8) !ParsedMessage {
         var io_reader = std.Io.Reader.fixed(buf);
         var dbus_reader = DbusMessageReader{
-            .pos = 0,
             .reader = &io_reader,
         };
 
@@ -645,10 +633,10 @@ pub const ParsedMessage = struct {
 
         const header_field_len = try dbus_reader.readU32(endianness);
 
-        const end_header_pos = dbus_reader.pos + header_field_len;
+        const end_header_pos = dbus_reader.reader.seek + header_field_len;
         try dbus_reader.alignForwards(8);
 
-        const header_buf = buf[dbus_reader.pos..end_header_pos];
+        const header_buf = buf[dbus_reader.reader.seek..end_header_pos];
 
         var header_it = HeaderIt {
             .fixed_reader = std.Io.Reader.fixed(header_buf),
@@ -658,20 +646,17 @@ pub const ParsedMessage = struct {
         var body_signature: []const u8 = "";
 
         while (try header_it.next()) |header| {
-            if (header.typ == .signature) {
-                if (header.val != .signature) {
-                    return error.InvalidSignature;
-                }
-                body_signature = header.val.signature;
+            if (header == .signature) {
+                body_signature = header.signature.inner;
             }
         }
 
         dbus_reader.toss(header_field_len);
 
-        if (dbus_reader.pos != end_header_pos) return error.InvalidHeader;
+        if (dbus_reader.reader.seek != end_header_pos) return error.InvalidHeader;
         try dbus_reader.alignForwards(8);
 
-        const body = buf[dbus_reader.pos..][0..body_len];
+        const body = buf[dbus_reader.reader.seek..][0..body_len];
 
         return .{
             .endianness = endianness,
@@ -681,7 +666,7 @@ pub const ParsedMessage = struct {
             .serial = serial,
             .header_buf = header_buf,
             .body = body,
-            .bytes_consumed = dbus_reader.pos + body_len,
+            .bytes_consumed = dbus_reader.reader.seek + body_len,
         };
     }
 
@@ -692,11 +677,11 @@ pub const ParsedMessage = struct {
         };
     }
 
-    pub fn getHeader(self: ParsedMessage, header: HeaderField) !?Variant {
+    pub fn getHeader(self: ParsedMessage, comptime header: HeaderField) !?@FieldType(HeaderIt.Item, @tagName(header)) {
         var it = self.headerIt();
         while (try it.next()) |f| {
-            if (f.typ == header) {
-                return f.val;
+            if (f == header) {
+                return @field(f, @tagName(header));
             }
         }
 
@@ -705,10 +690,7 @@ pub const ParsedMessage = struct {
 
     pub fn signature(self: ParsedMessage) ![]const u8 {
         const s = try self.getHeader(.signature) orelse return "";
-        switch (s) {
-            .signature => |v| return v,
-            else => return error.InvaliHeader,
-        }
+        return s.inner;
     }
 };
 
@@ -1049,6 +1031,9 @@ pub fn dbusParseBodyInner(comptime T: type, endianness: DbusEndianness, dr: *Dbu
 
             return .{ .inner = s };
         },
+        DbusSignature => {
+            return .{ .inner = try dr.readSignature() };
+        },
         Variant => {
             // Known that string content lives in body, so it's ok to not pass allocator
             return try dr.readVariant(endianness);
@@ -1115,7 +1100,6 @@ pub fn dbusParseBody(comptime T: type, message: ParsedMessage) !T {
     }
 
     var dr = DbusMessageReader{
-        .pos = 0,
         .reader = &reader,
     };
 
@@ -1235,9 +1219,8 @@ pub const DbusConnection = struct {
                 var reply_for: ?u32 = null;
                 var header_it = message.headerIt();
                 while (try header_it.next()) |f| {
-                    if (f.typ == .reply_serial) {
-                        if (f.val != .u32) break;
-                        reply_for = f.val.u32;
+                    if (f == .reply_serial) {
+                        reply_for = f.reply_serial;
                     }
                 }
 
@@ -1264,6 +1247,10 @@ pub const DbusObject = struct {
 };
 
 pub const DbusString = struct {
+    inner: []const u8,
+};
+
+pub const DbusSignature = struct {
     inner: []const u8,
 };
 
@@ -1297,7 +1284,6 @@ pub fn DbusArray(comptime Val: type) type {
 
                 var io_reader = std.Io.Reader.fixed(self.data);
                 var reader = DbusMessageReader {
-                    .pos = 0,
                     .reader = &io_reader,
                 };
                 reader.toss(self.offs);
@@ -1333,6 +1319,11 @@ fn generateDbusSignatureInner(comptime T: type, depth: usize) []const u8 {
     }
 
     switch (@typeInfo(T)) {
+        .pointer => |pi| {
+            if (pi.size == .slice) {
+                return "a" ++ generateDbusSignatureInner(pi.child, depth + 1);
+            }
+        },
         .@"struct" => |si| {
             if (@hasDecl(T, "DbusArrayMarker")) {
                 return "a" ++ generateDbusSignatureInner(T.T, depth + 1);
@@ -1460,7 +1451,7 @@ test "generated interface spotify play pause" {
         const retrieved_volume = blk: while (true) {
             const response = try fixture.connection.poll();
             switch (response) {
-                .initialized, .none => {},
+                .initialized, .call, .none => {},
                 .response => |params| {
                     if (params.handle.inner == volume_handle.inner) {
                         break :blk try mpris.OrgMprisMediaPlayer2Player.parseGetVolumeResponse(params.header);

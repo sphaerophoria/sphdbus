@@ -511,7 +511,7 @@ pub fn main() !void {
                 \\                    .{{
                 \\                          dbus.DbusString {{ .inner = "{[interface_name]s}" }},
                 \\                          dbus.DbusString {{ .inner = "{[property_name]s}" }},
-                \\                          try dbus.Variant2.fromConcrete(val),
+                \\                          try dbus.Variant.fromConcrete(val),
                 \\                    }},
                 \\                );
                 \\            }}

@@ -66,5 +66,5 @@ pub fn build(b: *std.Build) !void {
     b.installArtifact(example);
     b.installArtifact(generate);
     b.installArtifact(service_example);
-    //b.installArtifact(dbus_tests);
+    b.installArtifact(dbus_tests);
 }

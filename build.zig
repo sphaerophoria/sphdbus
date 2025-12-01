@@ -12,7 +12,6 @@ pub fn build(b: *std.Build) !void {
         .target = target,
         .optimize = optimize,
     });
-    dbus_mod.addImport("sphtud", sphtud);
 
     const generate = b.addExecutable(.{
         .name = "generate",
@@ -32,7 +31,6 @@ pub fn build(b: *std.Build) !void {
         .root_source_file = mpris_file,
     });
     mpris_mod.addImport("sphdbus", dbus_mod);
-    mpris_mod.addImport("sphtud", sphtud);
 
     const example = b.addExecutable(.{
         .name = "mpris_example",
@@ -46,6 +44,18 @@ pub fn build(b: *std.Build) !void {
     example.root_module.addImport("sphdbus", dbus_mod);
     example.root_module.addImport("mpris", mpris_mod);
 
+    const service_example = b.addExecutable(.{
+        .name = "service_example",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/service_example.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    service_example.root_module.addImport("sphtud", sphtud);
+    service_example.root_module.addImport("sphdbus", dbus_mod);
+
+
     const dbus_tests = b.addTest(.{
         .name = "dbus_tests",
         .root_module = dbus_mod,
@@ -55,5 +65,6 @@ pub fn build(b: *std.Build) !void {
 
     b.installArtifact(example);
     b.installArtifact(generate);
-    b.installArtifact(dbus_tests);
+    b.installArtifact(service_example);
+    //b.installArtifact(dbus_tests);
 }

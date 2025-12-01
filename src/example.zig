@@ -41,18 +41,41 @@ const DbusHandler = struct {
             switch (self.state) {
                 .wait_initialize => {
                     if (res == .initialized) {
-                        self.state = .{ .wait_volume =  try player.getVolume() };
+                        self.state = .{ .wait_volume =  try player.getMetadata() };
                     }
                 },
                 .wait_volume => |wait_for| {
                     if (res != .response) continue;
                     if (res.response.handle.inner != wait_for.inner) continue;
 
-                    const parsed = try mpris.OrgMprisMediaPlayer2Player.parseGetVolumeResponse(
+                    const parsed = try mpris.OrgMprisMediaPlayer2Player.parseGetMetadataResponse(
                         res.response.header,
                     );
 
-                    try player.setVolumeProperty(parsed - 0.1);
+                    var it = parsed.iter();
+                    while (try it.next()) |kv| {
+
+                        // FIXME: Probably should be part of lib?
+                        const KnownSigantures = enum {
+                            s,
+                            t,
+                            d,
+                            i,
+                        };
+                        std.debug.print("{s}: ", .{kv.key.inner});
+                        const parsed_sig = std.meta.stringToEnum(KnownSigantures, kv.val.signature()) orelse {
+                            std.debug.print("(cannot print {s})\n", .{kv.val.signature()});
+                            continue;
+                        };
+
+                        switch (parsed_sig) {
+                            .s => std.debug.print("{s}\n", .{(try kv.val.toConcrete(dbus.DbusString, res.response.header.endianness)).inner}),
+                            .t => std.debug.print("{d}\n", .{(try kv.val.toConcrete(u64, res.response.header.endianness))}),
+                            .d => std.debug.print("{d}\n", .{(try kv.val.toConcrete(f64, res.response.header.endianness))}),
+                            .i => std.debug.print("{d}\n", .{(try kv.val.toConcrete(i32, res.response.header.endianness))}),
+
+                        }
+                    }
 
                     return;
                 },

@@ -187,7 +187,15 @@ const DbusToZigTypeFormatter = struct {
             .reader = &reader,
         };
 
-        var in_struct = false;
+
+        // FIXME: Very similar to variant parsing code
+        const Tag = enum {
+            array,
+            @"struct",
+        };
+
+        var tag_stack_buf: [10]Tag = undefined;
+        var tag_stack = std.ArrayList(Tag).initBuffer(&tag_stack_buf);
 
         while (true) {
             const tag = tokenizer.next() catch {
@@ -196,27 +204,26 @@ const DbusToZigTypeFormatter = struct {
 
             switch (tag) {
                 .array_start => {
-                    try writer.writeAll("[]");
+                    try writer.writeAll("dbus.DbusArray(");
+                    tag_stack.appendBounded(.array) catch unreachable;
                 },
                 .struct_start => {
-                    // upgrade to stack on failure
-                    std.debug.assert(in_struct == false);
                     try writer.writeAll("struct {");
-                    in_struct = true;
+                    tag_stack.appendBounded(.@"struct") catch unreachable;
                 },
                 .struct_end => {
                     try writer.writeAll("}");
-                    in_struct = false;
+                    const last_elem = tag_stack.pop();
+                    std.debug.assert(last_elem == .@"struct");
                 },
                 .kv_start => {
-                    // upgrade to stack on failure
-                    std.debug.assert(in_struct == false);
                     try writer.writeAll("dbus.DbusKV(");
-                    in_struct = true;
+                    tag_stack.appendBounded(.@"struct") catch unreachable;
                 },
                 .kv_end => {
                     try writer.writeAll(")");
-                    in_struct = false;
+                    const last_elem = tag_stack.pop();
+                    std.debug.assert(last_elem == .@"struct");
                 },
                 .u32 => try writer.writeAll("u32"),
                 .u64 => try writer.writeAll("u64"),
@@ -226,14 +233,18 @@ const DbusToZigTypeFormatter = struct {
                 .object => try writer.writeAll("dbus.DbusObject"),
                 .string => try writer.writeAll("dbus.DbusString"),
                 .bool => try writer.writeAll("bool"),
-                .variant => try writer.writeAll("dbus.Variant"),
+                .variant => try writer.writeAll("dbus.Variant2"),
             }
 
             switch (tag) {
                 .array_start, .struct_start, .kv_start => {},
                 else => {
-                    if (in_struct) {
+                    const last_elem = tag_stack.getLastOrNull();
+                    if (last_elem == .@"struct") {
                         try writer.writeAll(", ");
+                    } else if (last_elem == .array) {
+                        try writer.writeAll(")");
+                        _ = tag_stack.pop();
                     }
                 },
             }
@@ -352,7 +363,6 @@ pub fn main() !void {
     var f_writer = std.Io.Writer.Allocating.init(root_alloc.allocator());
     try f_writer.writer.writeAll(
         \\const dbus = @import("sphdbus");
-        \\const sphtud = @import("sphtud");
         \\const std = @import("std");
         \\
         \\
@@ -466,15 +476,6 @@ pub fn main() !void {
         while (property_it.next()) |property| {
             if (!isPropertySupported(property.*)) continue;
 
-            const needs_allocation = try needsAllocation(property.typ);
-
-            const alloc_params: []const u8, const alloc_passthrough: []const u8 = if (needs_allocation) .{
-                "alloc: std.mem.Allocator, scratch: sphtud.alloc.LinearAllocator, ",
-                "alloc, scratch, "
-            } else .{
-                "",
-                "sphtud.alloc.failing_allocator, sphtud.alloc.failing_linear, ",
-            };
             try f_writer.writer.print(
                 \\            pub fn @"get{[property_name]s}"(
                 \\                self: Self,
@@ -492,10 +493,10 @@ pub fn main() !void {
                 \\            }}
                 \\
                 \\            pub fn @"parseGet{[property_name]s}Response"(
-                \\                {[alloc_params]s} message: dbus.ParsedMessage,
+                \\                message: dbus.ParsedMessage,
                 \\            ) !{[zig_type]f} {{
-                \\                const v = try dbus.dbusParseBody(dbus.Variant, {[alloc_passthrough]s} message);
-                \\                return v.toConcrete({[zig_type]f});
+                \\                const v = try dbus.dbusParseBody(dbus.Variant2, message);
+                \\                return v.toConcrete({[zig_type]f}, message.endianness);
                 \\            }}
                 \\
                 \\            pub fn @"set{[property_name]s}Property"(
@@ -510,14 +511,12 @@ pub fn main() !void {
                 \\                    .{{
                 \\                          dbus.DbusString {{ .inner = "{[interface_name]s}" }},
                 \\                          dbus.DbusString {{ .inner = "{[property_name]s}" }},
-                \\                          try dbus.Variant.fromConcrete(val),
+                \\                          try dbus.Variant2.fromConcrete(val),
                 \\                    }},
                 \\                );
                 \\            }}
                 \\
             , .{
-                .alloc_params = alloc_params,
-                .alloc_passthrough = alloc_passthrough,
                 .property_name = property.name,
                 .interface_name = interface.name,
                 .zig_type = dbusToZigType(property.typ),

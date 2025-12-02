@@ -204,7 +204,7 @@ const DbusToZigTypeFormatter = struct {
 
             switch (tag) {
                 .array_start => {
-                    try writer.writeAll("dbus.DbusArray(");
+                    try writer.writeAll("dbus.ParseArray(");
                     tag_stack.appendBounded(.array) catch unreachable;
                 },
                 .struct_start => {
@@ -233,7 +233,7 @@ const DbusToZigTypeFormatter = struct {
                 .object => try writer.writeAll("dbus.DbusObject"),
                 .string => try writer.writeAll("dbus.DbusString"),
                 .bool => try writer.writeAll("bool"),
-                .variant => try writer.writeAll("dbus.Variant2"),
+                .variant => try writer.writeAll("dbus.ParseVariant"),
                 .signature => try writer.writeAll("dbus.DbusSignature"),
             }
 
@@ -437,7 +437,7 @@ pub fn main() !void {
                 });
             }
             try f_writer.writer.print(
-                \\            ) !dbus.DbusConnection.CallHandle {{
+                \\            ) !dbus.CallHandle {{
                 \\                return try self.connection.call(
                 \\                    self.object_path,
                 \\                    self.service,
@@ -496,7 +496,7 @@ pub fn main() !void {
                 \\            pub fn @"parseGet{[property_name]s}Response"(
                 \\                message: dbus.ParsedMessage,
                 \\            ) !{[zig_type]f} {{
-                \\                const v = try dbus.dbusParseBody(dbus.Variant2, message);
+                \\                const v = try dbus.dbusParseBody(dbus.ParseVariant, message);
                 \\                return v.toConcrete({[zig_type]f}, message.endianness);
                 \\            }}
                 \\
@@ -512,7 +512,7 @@ pub fn main() !void {
                 \\                    .{{
                 \\                          dbus.DbusString {{ .inner = "{[interface_name]s}" }},
                 \\                          dbus.DbusString {{ .inner = "{[property_name]s}" }},
-                \\                          dbus.makeVariant(val),
+                \\                          dbus.serializationVariant(val),
                 \\                    }},
                 \\                );
                 \\            }}

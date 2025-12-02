@@ -4,7 +4,7 @@ const builtin = @import("builtin");
 const dbus = @import("sphdbus");
 const mpris = @import("mpris");
 
-fn waitForResponse(connection: *dbus.DbusConnection, handle: dbus.DbusConnection.CallHandle) !void {
+fn waitForResponse(connection: *dbus.DbusConnection, handle: dbus.CallHandle) !void {
     while (true) {
         const res = try connection.poll();
         const response = switch (res) {

@@ -8,7 +8,7 @@ const DbusHandler = struct {
     connection: dbus.DbusConnection,
     state: union(enum) {
         wait_initialize,
-        wait_volume: dbus.DbusConnection.CallHandle,
+        wait_volume: dbus.CallHandle,
     },
 
     pub fn init(alloc: std.mem.Allocator) !DbusHandler {

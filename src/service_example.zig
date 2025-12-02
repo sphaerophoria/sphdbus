@@ -33,6 +33,9 @@ const DbusHandlerError = error {
     InvalidSignature,
     UnhandledSignature,
     InvalidArraySignature,
+    NoMember,
+    NoInterface,
+    NoHandler,
 } || std.Io.Writer.Error || std.Io.Reader.Error;
 
 const ExpectedObjectPath = enum {
@@ -54,6 +57,7 @@ const ExpectedObjectPath = enum {
 
 
 fn handleIntrospectionOnlyPath(message: dbus.ParsedMessage, path: ExpectedObjectPath, connection: *dbus.DbusConnection) DbusHandlerError!void {
+    // FIXME: Why would we iterate the header list once per field idiot
     const member = try message.getHeader(.member) orelse return error.InvalidCall;
     const interface = try message.getHeader(.interface) orelse return error.InvalidCall;
 
@@ -83,55 +87,129 @@ fn handleIntrospectionOnlyPath(message: dbus.ParsedMessage, path: ExpectedObject
     });
 }
 
-fn writeResponse(message: dbus.ParsedMessage, connection: *dbus.DbusConnection) DbusHandlerError!void {
-    const path = (try message.getHeader(.path)) orelse return error.NoPath;
-    // FIXME: Crashy crashy
-    const parsed_path = std.meta.stringToEnum(ExpectedObjectPath, path.inner) orelse return error.UnexpectedPath;
-
-    switch (parsed_path) {
-        .@"/", .@"/dev", .@"/dev/sphaerophoria" => try handleIntrospectionOnlyPath(message, parsed_path, connection),
-        .@"/dev/sphaerophoria/TestService" => {
-            const Interface = enum {
-                @"org.freedesktop.DBus.Introspectable",
-                @"dev.sphaerophoria.TestService",
-            };
-
-            const interface = (try message.getHeader(.interface)) orelse return error.InvalidCall;
-            const member = try message.getHeader(.member) orelse return error.InvalidCall;
-
-            const parsed_interface = std.meta.stringToEnum(Interface, interface.inner) orelse return error.Unimplemented;
-            switch (parsed_interface) {
-                .@"org.freedesktop.DBus.Introspectable" => {
-                    if (!std.mem.eql(u8, member.inner, "Introspect")) {
-                        return error.Unimplemented;
-                    }
-
-                    // FIXME: Crashy crashy crashy
-                    const sender = (try message.getHeader(.sender)).?;
-
-                    try connection.ret(message.serial, sender.inner, .{
-                        dbus.DbusString { .inner = api },
-                    });
-
-                },
-                .@"dev.sphaerophoria.TestService" => {
-                    if (!std.mem.eql(u8, member.inner, "Hello")) {
-                        return error.Unimplemented;
-                    }
-
-                    // FIXME: Crashy crashy crashy
-                    const sender = (try message.getHeader(.sender)).?.inner;
-
-                    try connection.ret(message.serial, sender, .{
-                        dbus.DbusString { .inner = "Hello from dbus service" },
-                    });
-                },
-
-
-            }
-        },
+pub fn ObjectApi(comptime Api: type) type {
+    if (!@hasDecl(Api, "name")) {
+        @compileError("Api needs name retrieval function");
     }
+
+    if (!@hasDecl(Api, "definition")) {
+        @compileError("Api needs definition retrieval function");
+    }
+
+    return struct {
+        path: []const u8,
+        api: Api,
+    };
 }
+
+fn getDirectChildPathName(introspection_path: []const u8, service_path: []const u8) ?[]const u8 {
+    if (service_path.len <= introspection_path.len) return null;
+
+    if (!std.mem.startsWith(u8, service_path, introspection_path)) {
+        return null;
+    }
+
+    const end_idx = std.mem.indexOfScalarPos(u8, service_path, introspection_path.len, '/') orelse service_path.len;
+    return service_path[introspection_path.len..end_idx];
+}
+
+fn handleCommonDbusRequests(comptime Api: type, message: dbus.ParsedMessage, connection: *dbus.DbusConnection, services: []const ObjectApi(Api)) !?Api {
+
+    const member = (try message.getHeader(.member)) orelse return error.NoMember;
+    const interface = (try message.getHeader(.interface)) orelse return error.NoInterface;
+    const path = (try message.getHeader(.path)) orelse return error.NoPath;
+
+    if (std.mem.eql(u8, interface.inner, "org.freedesktop.DBus.Introspectable") and std.mem.eql(u8, member.inner, "Introspect")) {
+        var out_buf: [4096]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&out_buf);
+
+        for (services) |service| {
+            try writer.writeAll(
+                \\<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN"
+                \\"http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">
+                \\<node >
+                \\
+            );
+
+            if (getDirectChildPathName(path.inner, service.path)) |name| {
+                try writer.print(
+                    \\<node name="{s}"/>
+                    \\
+                    , .{name});
+            }
+
+            try writer.writeAll(
+                \\</node>
+            );
+        }
+
+        // FIXME: Crashy crashy crashy
+        const sender = (try message.getHeader(.sender)).?.inner;
+
+        std.debug.print("intrpsection response\n{s}", .{writer.buffered()});
+        try connection.ret(message.serial, sender, .{
+            dbus.DbusString { .inner = writer.buffered() },
+        });
+
+        // Is path that they gave us an ancestor of any of our paths
+
+        return null;
+    }
+
+
+    for (services) |service| {
+        if (std.mem.eql(u8, path.inner, service.path) and std.mem.eql(u8, service.api.name(), interface.inner)) {
+            return service.api;
+        }
+    }
+
+    return error.NoHandler;
+}
+
+fn writeResponse(message: dbus.ParsedMessage, connection: *dbus.DbusConnection) DbusHandlerError!void {
+    const Api = struct {
+        fn name(_: @This()) []const u8 {
+            return "dev.sphaerophoria.TestService";
+        }
+
+        fn definition(_: @This()) []const u8 {
+            return
+                \\<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN"
+                \\"http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">
+                \\<node >
+                \\  <interface name="dev.sphaerophoria.TestService">
+                \\    <method name="Hello">
+                \\      <arg direction="out" type="s"/>
+                \\    </method>
+                \\  </interface>
+                \\</node>
+            ;
+        }
+    };
+
+    const services = [_]ObjectApi(Api){
+        .{
+            .path = "/dev/sphaerophoria/TestService",
+            .api = .{},
+        },
+    };
+
+    _ = (try handleCommonDbusRequests(Api, message, connection, &services)) orelse return;
+
+    // FIXME: duplicated?
+    const member = (try message.getHeader(.member)) orelse return error.NoMember;
+    if (!std.mem.eql(u8, member.inner, "Hello")) {
+        return error.Unimplemented;
+    }
+
+    // FIXME: Crashy crashy crashy
+    const sender = (try message.getHeader(.sender)).?.inner;
+
+    try connection.ret(message.serial, sender, .{
+        dbus.DbusString { .inner = "Hello from dbus service" },
+    });
+}
+
 const api =
     \\<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN"
     \\"http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">

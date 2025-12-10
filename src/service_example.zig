@@ -19,6 +19,15 @@ fn waitForResponse(connection: *dbus.DbusConnection, handle: dbus.CallHandle) !v
 
 const service_object = "/dev/sphaerophoria/TestService";
 
+
+// FIXME: This seems unreasonable. Less errors and more diagnostics might be a
+// better play
+//
+// Errors that result in returning an error to the caller
+//    * Error message and dbus type conversion
+// Errors that result in us shutting down our dbus connection
+// Errors that are unrecoverable?
+// Blocking/nonblocking errors
 const DbusHandlerError = error {
     InvalidHeaderField,
     // FIXME: Path -> Object?
@@ -50,7 +59,6 @@ const ExpectedObjectPath = enum {
             .@"/dev" => return "sphaerophoria",
             .@"/dev/sphaerophoria" => return "TestService",
             .@"/dev/sphaerophoria/TestService" => unreachable,
-
         }
     }
 };
@@ -205,9 +213,9 @@ fn writeResponse(message: dbus.ParsedMessage, connection: *dbus.DbusConnection) 
     // FIXME: Crashy crashy crashy
     const sender = (try message.getHeader(.sender)).?.inner;
 
-    try connection.ret(message.serial, sender, .{
-        dbus.DbusString { .inner = "Hello from dbus service" },
-    });
+    try connection.err(message.serial, sender, .{ .inner = "dev.sphaerophoria.TestService.Error" },
+        dbus.DbusString { .inner = "Something went terribly wrong" },
+    );
 }
 
 const api =
@@ -259,6 +267,13 @@ pub fn main() !void {
             .call => |params| params,
             else => continue,
         };
+
+        // Dbus service
+        //
+        // RecoverableError -- Report error somehow?
+        // FatalError -- I've parsed 1/10th of a packet and don't know how to consume the rest
+        //
+        // Packet parse
 
         std.debug.print("someone is asking us for something {any}\n", .{params});
         try writeResponse(params, &connection);

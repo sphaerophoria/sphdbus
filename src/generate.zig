@@ -480,7 +480,7 @@ pub fn main() !void {
             try f_writer.writer.print(
                 \\            pub fn @"get{[property_name]s}"(
                 \\                self: Self,
-                \\            ) !dbus.DbusConnection.CallHandle {{
+                \\            ) !dbus.CallHandle {{
                 \\                return try self.connection.call(
                 \\                    self.object_path,
                 \\                    self.service,

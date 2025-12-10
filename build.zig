@@ -55,7 +55,6 @@ pub fn build(b: *std.Build) !void {
     service_example.root_module.addImport("sphtud", sphtud);
     service_example.root_module.addImport("sphdbus", dbus_mod);
 
-
     const dbus_tests = b.addTest(.{
         .name = "dbus_tests",
         .root_module = dbus_mod,

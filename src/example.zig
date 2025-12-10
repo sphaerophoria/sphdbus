@@ -32,7 +32,7 @@ const DbusHandler = struct {
         while (true) {
             const res = try self.connection.poll();
 
-            const player = mpris.OrgMprisMediaPlayer2Player {
+            const player = mpris.OrgMprisMediaPlayer2Player{
                 .connection = &self.connection,
                 .service = "org.mpris.MediaPlayer2.spotify",
                 .object_path = "/org/mpris/MediaPlayer2",
@@ -41,7 +41,7 @@ const DbusHandler = struct {
             switch (self.state) {
                 .wait_initialize => {
                     if (res == .initialized) {
-                        self.state = .{ .wait_volume =  try player.getMetadata() };
+                        self.state = .{ .wait_volume = try player.getMetadata() };
                     }
                 },
                 .wait_volume => |wait_for| {
@@ -78,7 +78,6 @@ const DbusHandler = struct {
                             .t => std.debug.print("{d}\n", .{(try kv.val.toConcrete(u64, res.response.header.endianness))}),
                             .d => std.debug.print("{d}\n", .{(try kv.val.toConcrete(f64, res.response.header.endianness))}),
                             .i => std.debug.print("{d}\n", .{(try kv.val.toConcrete(i32, res.response.header.endianness))}),
-
                         }
                     }
 
@@ -88,7 +87,7 @@ const DbusHandler = struct {
         }
     }
 
-    fn close (ctx: ?*anyopaque) void {
+    fn close(ctx: ?*anyopaque) void {
         _ = ctx;
     }
 };

@@ -16,9 +16,7 @@ fn waitForResponse(connection: *dbus.DbusConnection, handle: dbus.CallHandle) !v
     }
 }
 
-
 const service_object = "/dev/sphaerophoria/TestService";
-
 
 // FIXME: This seems unreasonable. Less errors and more diagnostics might be a
 // better play
@@ -28,7 +26,7 @@ const service_object = "/dev/sphaerophoria/TestService";
 // Errors that result in us shutting down our dbus connection
 // Errors that are unrecoverable?
 // Blocking/nonblocking errors
-const DbusHandlerError = error {
+const DbusHandlerError = error{
     InvalidHeaderField,
     // FIXME: Path -> Object?
     NoPath,
@@ -63,17 +61,16 @@ const ExpectedObjectPath = enum {
     }
 };
 
-
 fn handleIntrospectionOnlyPath(message: dbus.ParsedMessage, path: ExpectedObjectPath, connection: *dbus.DbusConnection) DbusHandlerError!void {
     // FIXME: Why would we iterate the header list once per field idiot
     const member = try message.getHeader(.member) orelse return error.InvalidCall;
     const interface = try message.getHeader(.interface) orelse return error.InvalidCall;
 
-    if (!std.mem.eql(u8, interface.inner, "org.freedesktop.DBus.Introspectable" )) {
+    if (!std.mem.eql(u8, interface.inner, "org.freedesktop.DBus.Introspectable")) {
         return error.Unimplemented;
     }
 
-    if (!std.mem.eql(u8, member.inner, "Introspect" )) {
+    if (!std.mem.eql(u8, member.inner, "Introspect")) {
         return error.Unimplemented;
     }
 
@@ -91,7 +88,7 @@ fn handleIntrospectionOnlyPath(message: dbus.ParsedMessage, path: ExpectedObject
     const sender = (try message.getHeader(.sender)).?.inner;
 
     try connection.ret(message.serial, sender, .{
-        dbus.DbusString { .inner = writer.buffered() },
+        dbus.DbusString{ .inner = writer.buffered() },
     });
 }
 
@@ -122,7 +119,6 @@ fn getDirectChildPathName(introspection_path: []const u8, service_path: []const 
 }
 
 fn handleCommonDbusRequests(comptime Api: type, message: dbus.ParsedMessage, connection: *dbus.DbusConnection, services: []const ObjectApi(Api)) !?Api {
-
     const member = (try message.getHeader(.member)) orelse return error.NoMember;
     const interface = (try message.getHeader(.interface)) orelse return error.NoInterface;
     const path = (try message.getHeader(.path)) orelse return error.NoPath;
@@ -143,7 +139,7 @@ fn handleCommonDbusRequests(comptime Api: type, message: dbus.ParsedMessage, con
                 try writer.print(
                     \\<node name="{s}"/>
                     \\
-                    , .{name});
+                , .{name});
             }
 
             try writer.writeAll(
@@ -156,14 +152,13 @@ fn handleCommonDbusRequests(comptime Api: type, message: dbus.ParsedMessage, con
 
         std.debug.print("intrpsection response\n{s}", .{writer.buffered()});
         try connection.ret(message.serial, sender, .{
-            dbus.DbusString { .inner = writer.buffered() },
+            dbus.DbusString{ .inner = writer.buffered() },
         });
 
         // Is path that they gave us an ancestor of any of our paths
 
         return null;
     }
-
 
     for (services) |service| {
         if (std.mem.eql(u8, path.inner, service.path) and std.mem.eql(u8, service.api.name(), interface.inner)) {
@@ -181,16 +176,16 @@ fn writeResponse(message: dbus.ParsedMessage, connection: *dbus.DbusConnection) 
         }
 
         fn definition(_: @This()) []const u8 {
-            return
-                \\<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN"
-                \\"http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">
-                \\<node >
-                \\  <interface name="dev.sphaerophoria.TestService">
-                \\    <method name="Hello">
-                \\      <arg direction="out" type="s"/>
-                \\    </method>
-                \\  </interface>
-                \\</node>
+            return 
+            \\<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN"
+            \\"http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">
+            \\<node >
+            \\  <interface name="dev.sphaerophoria.TestService">
+            \\    <method name="Hello">
+            \\      <arg direction="out" type="s"/>
+            \\    </method>
+            \\  </interface>
+            \\</node>
             ;
         }
     };
@@ -213,8 +208,11 @@ fn writeResponse(message: dbus.ParsedMessage, connection: *dbus.DbusConnection) 
     // FIXME: Crashy crashy crashy
     const sender = (try message.getHeader(.sender)).?.inner;
 
-    try connection.err(message.serial, sender, .{ .inner = "dev.sphaerophoria.TestService.Error" },
-        dbus.DbusString { .inner = "Something went terribly wrong" },
+    try connection.err(
+        message.serial,
+        sender,
+        .{ .inner = "dev.sphaerophoria.TestService.Error" },
+        dbus.DbusString{ .inner = "Something went terribly wrong" },
     );
 }
 
@@ -254,7 +252,7 @@ pub fn main() !void {
         "org.freedesktop.DBus",
         "RequestName",
         .{
-            dbus.DbusString { .inner = "dev.sphaerophoria.TestService" },
+            dbus.DbusString{ .inner = "dev.sphaerophoria.TestService" },
             @as(u32, 0),
         },
     );
@@ -277,7 +275,6 @@ pub fn main() !void {
 
         std.debug.print("someone is asking us for something {any}\n", .{params});
         try writeResponse(params, &connection);
-
     }
 
     std.debug.print("done\n", .{});

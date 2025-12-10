@@ -73,7 +73,6 @@ pub const SignatureTokenizer = struct {
                 return error.UnhandledSignature;
             },
         };
-
     }
 
     fn peekByte(self: SignatureTokenizer) !?u8 {
@@ -251,7 +250,7 @@ const DbusMessageReader = struct {
 
         const signature_s = try self.readSignature();
         var signature_reader = std.Io.Reader.fixed(signature_s);
-        var signature_it = SignatureTokenizer {
+        var signature_it = SignatureTokenizer{
             .reader = &signature_reader,
         };
 
@@ -288,7 +287,6 @@ const DbusMessageReader = struct {
                             .array_start, .bool, .u32, .i32, .string, .object => try self.alignForwards(4),
                             .kv_end, .struct_end => return error.InvalidArraySignature,
                             .signature, .variant => {},
-
                         }
                         self.toss(len_bytes);
                     }
@@ -304,7 +302,10 @@ const DbusMessageReader = struct {
                     const last_tag = tag_stack.pop();
                     std.debug.assert(last_tag == .@"struct");
                 },
-                .bool, .u32, .i32, => {
+                .bool,
+                .u32,
+                .i32,
+                => {
                     if (!in_array) {
                         _ = try self.readU32(endianness);
                     }
@@ -332,11 +333,7 @@ const DbusMessageReader = struct {
             }
 
             switch (token) {
-                .struct_end, .kv_end,
-                .bool, .u32, .i32,
-                .u64, .i64, .f64,
-                .object, .string, .signature,
-                .variant => {
+                .struct_end, .kv_end, .bool, .u32, .i32, .u64, .i64, .f64, .object, .string, .signature, .variant => {
                     if (tag_stack.getLastOrNull()) |t| {
                         if (t == .array) {
                             _ = tag_stack.pop();
@@ -389,24 +386,22 @@ pub const ParseVariant = struct {
     data: []const u8,
 
     pub fn signature(self: ParseVariant) []const u8 {
-        return self.data[self.variant_start + 1..self.variant_start + self.signature_len + 1];
+        return self.data[self.variant_start + 1 .. self.variant_start + self.signature_len + 1];
     }
 
     pub fn toConcrete(self: ParseVariant, comptime T: type, endianness: DbusEndianness) !T {
-
-        if (!std.mem.eql(u8, generateDbusSignature(T), self.data[self.variant_start + 1..self.variant_start + self.signature_len + 1])) {
+        if (!std.mem.eql(u8, generateDbusSignature(T), self.data[self.variant_start + 1 .. self.variant_start + self.signature_len + 1])) {
             return error.InvalidSignature;
         }
 
         var io_reader = std.Io.Reader.fixed(self.data);
-        var dr = DbusMessageReader {
+        var dr = DbusMessageReader{
             .reader = &io_reader,
         };
         dr.toss(self.variant_start + self.signature_len + 2);
 
         return dbusParseBodyInner(T, endianness, &dr);
     }
-
 };
 
 pub fn SerializationVariant(comptime T: type) type {
@@ -444,7 +439,7 @@ const HeaderIt = struct {
             return null;
         }
 
-        var dbus_reader = DbusMessageReader {
+        var dbus_reader = DbusMessageReader{
             .reader = &self.fixed_reader,
         };
 
@@ -452,7 +447,7 @@ const HeaderIt = struct {
         const header_field_byte = try dbus_reader.readByte();
         const header_field = std.meta.intToEnum(HeaderFieldTag, header_field_byte) catch return error.InvalidHeaderField;
 
-        switch (header_field)  {
+        switch (header_field) {
             inline else => |t| {
                 const T = @FieldType(HeaderField, @tagName(t));
                 const v = try dbusParseBodyInner(ParseVariant, self.endianness, &dbus_reader);
@@ -475,10 +470,7 @@ pub const ParsedMessage = struct {
     pub fn parse(buf: []const u8, diagnostics_state: ?*DbusErrorDiagnostics) DbusError!ParsedMessage {
         var io_reader = std.Io.Reader.fixed(buf);
 
-        const diagnostics = DiagnosticsWriter {
-            .diagnostics = diagnostics_state,
-            .reader = &io_reader
-        };
+        const diagnostics = DiagnosticsWriter{ .diagnostics = diagnostics_state, .reader = &io_reader };
 
         var dbus_reader = DbusMessageReader{
             .reader = &io_reader,
@@ -605,7 +597,6 @@ pub const DbusHeader = struct {
     }
 
     pub fn ret(serial: u32, reply_serial: u32, destination: []const u8, body: anytype, field_buf: []HeaderField) !DbusHeader {
-
         var header_fields = std.ArrayList(HeaderField).initBuffer(field_buf);
         try header_fields.appendSliceBounded(&.{
             .{
@@ -639,7 +630,6 @@ pub const DbusHeader = struct {
     }
 
     pub fn err(serial: u32, reply_serial: u32, destination: []const u8, err_name: DbusString, body: ?DbusString, field_buf: []HeaderField) !DbusHeader {
-
         var header_fields = std.ArrayList(HeaderField).initBuffer(field_buf);
         try header_fields.appendSliceBounded(&.{
             .{
@@ -662,7 +652,6 @@ pub const DbusHeader = struct {
 
             try dbusSerialize(&discarding_writer.writer, s);
         }
-
 
         return DbusHeader{
             .endianness = .little,
@@ -808,10 +797,10 @@ pub const DbusConnectionInitializer = struct {
                     .body_len = 0,
                     .serial = 1,
                     .header_fields = &.{
-                        .{ .path = .{ .inner = "/org/freedesktop/DBus"}} ,
-                        .{ .destination =  .{ .inner = "org.freedesktop.DBus" }},
-                        .{ .interface = .{ .inner = "org.freedesktop.DBus" }},
-                        .{ .member = .{ .inner = "Hello" }},
+                        .{ .path = .{ .inner = "/org/freedesktop/DBus" } },
+                        .{ .destination = .{ .inner = "org.freedesktop.DBus" } },
+                        .{ .interface = .{ .inner = "org.freedesktop.DBus" } },
+                        .{ .member = .{ .inner = "Hello" } },
                     },
                 };
                 try hello_message.serialize(io_writer, .{});
@@ -949,7 +938,6 @@ pub fn dbusParseBodyInner(comptime T: type, endianness: DbusEndianness, dr: *Dbu
                     .endianness = endianness,
                     .data = dr.reader.buffer[0..dr.reader.seek],
                 };
-
             }
             var ret: T = undefined;
             try dr.alignForwards(8);
@@ -991,10 +979,9 @@ pub fn dbusConnection(reader: *std.Io.Reader, writer: *std.Io.Writer) !DbusConne
     };
 }
 
-const DbusError = error {
+const DbusError = error{
     ParseError,
 } || std.Io.Reader.Error;
-
 
 const DbusErrorDiagnostics = struct {
     // FIXME: Maybe an enum instead of polluting error space?
@@ -1003,7 +990,6 @@ const DbusErrorDiagnostics = struct {
     message_buf: []u8,
     message_len: usize,
 };
-
 
 const DiagnosticsWriter = struct {
     diagnostics: ?*DbusErrorDiagnostics,
@@ -1021,164 +1007,163 @@ const DiagnosticsWriter = struct {
 
         return error.ParseError;
     }
-
 };
 pub const CallHandle = struct { inner: u32 };
 
 pub const DbusConnection = struct {
-        serial: u32,
-        reader: *std.Io.Reader,
-        writer: *std.Io.Writer,
-        state: union(enum) {
-            initializing: DbusConnectionInitializer,
-            ready,
+    serial: u32,
+    reader: *std.Io.Reader,
+    writer: *std.Io.Writer,
+    state: union(enum) {
+        initializing: DbusConnectionInitializer,
+        ready,
+    },
+
+    const Self = @This();
+
+    pub fn call(self: *Self, path: []const u8, destination: []const u8, interface: []const u8, member: []const u8, body: anytype) !CallHandle {
+        if (self.state != .ready) return error.Uninitialized;
+
+        var field_buf: [6]HeaderField = undefined;
+        const to_send = try DbusHeader.call(
+            self.serial,
+            path,
+            destination,
+            interface,
+            member,
+            body,
+            &field_buf,
+        );
+        const handle = CallHandle{ .inner = self.serial };
+        // We shouldn't have an outstanding request from 2^32 requests ago
+        self.serial +%= 1;
+
+        try to_send.serialize(self.writer, body);
+        try self.writer.flush();
+
+        return handle;
+    }
+
+    pub fn ret(self: *DbusConnection, reply_serial: u32, destination: []const u8, body: anytype) !void {
+        if (self.state != .ready) return error.Uninitialized;
+
+        var field_buf: [6]HeaderField = undefined;
+        const to_send = try DbusHeader.ret(
+            self.serial,
+            reply_serial,
+            destination,
+            body,
+            &field_buf,
+        );
+        // We shouldn't have an outstanding request from 2^32 requests ago
+        self.serial +%= 1;
+
+        try to_send.serialize(self.writer, body);
+        try self.writer.flush();
+    }
+
+    // FIXME: Duplication between ret/err/call
+    pub fn err(self: *DbusConnection, reply_serial: u32, destination: []const u8, err_name: DbusString, body: ?DbusString) !void {
+        if (self.state != .ready) return error.Uninitialized;
+
+        var field_buf: [6]HeaderField = undefined;
+        const to_send = try DbusHeader.err(
+            self.serial,
+            reply_serial,
+            destination,
+            err_name,
+            body,
+            &field_buf,
+        );
+        // We shouldn't have an outstanding request from 2^32 requests ago
+        self.serial +%= 1;
+
+        if (body) |b| {
+            try to_send.serialize(self.writer, b);
+        } else {
+            try to_send.serialize(self.writer, .{});
+        }
+
+        try self.writer.flush();
+    }
+
+    pub const Response = union(enum) {
+        initialized,
+        call: ParsedMessage,
+        response: struct {
+            handle: CallHandle,
+            header: ParsedMessage,
         },
+        none,
+    };
 
-        const Self = @This();
+    pub fn poll(self: *Self) !Response {
+        return self.pollInner(null);
+    }
 
-        pub fn call(self: *Self, path: []const u8, destination: []const u8, interface: []const u8, member: []const u8, body: anytype) !CallHandle {
-            if (self.state != .ready) return error.Uninitialized;
+    pub fn pollDiagnostics(self: *Self, diagnostics: *DbusErrorDiagnostics) !Response {
+        return self.pollInner(diagnostics);
+    }
 
-            var field_buf: [6]HeaderField = undefined;
-            const to_send = try DbusHeader.call(
-                self.serial,
-                path,
-                destination,
-                interface,
-                member,
-                body,
-                &field_buf,
-            );
-            const handle = CallHandle { .inner = self.serial };
-            // We shouldn't have an outstanding request from 2^32 requests ago
-            self.serial +%= 1;
-
-            try to_send.serialize(self.writer, body);
-            try self.writer.flush();
-
-            return handle;
-        }
-
-        pub fn ret(self: *DbusConnection, reply_serial: u32, destination: []const u8, body: anytype) !void {
-            if (self.state != .ready) return error.Uninitialized;
-
-            var field_buf: [6]HeaderField = undefined;
-            const to_send = try DbusHeader.ret(
-                self.serial,
-                reply_serial,
-                destination,
-                body,
-                &field_buf,
-            );
-            // We shouldn't have an outstanding request from 2^32 requests ago
-            self.serial +%= 1;
-
-            try to_send.serialize(self.writer, body);
-            try self.writer.flush();
-        }
-
-        // FIXME: Duplication between ret/err/call
-        pub fn err(self: *DbusConnection, reply_serial: u32, destination: []const u8, err_name: DbusString, body: ?DbusString) !void {
-            if (self.state != .ready) return error.Uninitialized;
-
-            var field_buf: [6]HeaderField = undefined;
-            const to_send = try DbusHeader.err(
-                self.serial,
-                reply_serial,
-                destination,
-                err_name,
-                body,
-                &field_buf,
-            );
-            // We shouldn't have an outstanding request from 2^32 requests ago
-            self.serial +%= 1;
-
-            if (body) |b| {
-                try to_send.serialize(self.writer, b);
-            } else {
-                try to_send.serialize(self.writer, .{});
-            }
-
-            try self.writer.flush();
-        }
-
-        pub const Response = union(enum) {
-            initialized,
-            call: ParsedMessage,
-            response: struct {
-                handle: CallHandle,
-                header: ParsedMessage,
+    fn pollInner(self: *Self, diagnostics: ?*DbusErrorDiagnostics) !Response {
+        switch (self.state) {
+            .initializing => |*initializer| {
+                if (!try initializer.poll(self.reader, self.writer)) {
+                    return .none;
+                }
+                self.state = .ready;
+                return .initialized;
             },
-            none,
-        };
+            .ready => {
+                return self.pollReady(diagnostics);
+            },
+        }
+    }
 
-        pub fn poll(self: *Self) !Response {
-            return self.pollInner(null);
+    fn pollReady(self: *Self, diagnostics: ?*DbusErrorDiagnostics) !Response {
+        // It's easier to parse from a buffer than it is to write
+        // DbusHeader.parse in a way where it doesn't consume bytes from
+        // the reader for a partial read. Fill in outer loop as much as
+        // possible, then if the parse fails below because there wasn't
+        // enough data, we can just fill again until we return WouldBlock
+        // here
+        if (self.reader.bufferedLen() == 0) {
+            try self.reader.fillMore();
         }
 
-        pub fn pollDiagnostics(self: *Self, diagnostics: *DbusErrorDiagnostics) !Response {
-            return self.pollInner(diagnostics);
-        }
+        while (true) {
+            // Store time since last partial message
+            const message = ParsedMessage.parse(self.reader.buffered(), diagnostics) catch |e| switch (e) {
+                error.EndOfStream => return .none,
+                else => return e,
+            };
 
-        fn pollInner(self: *Self, diagnostics: ?*DbusErrorDiagnostics) !Response {
-            switch (self.state) {
-                .initializing => |*initializer| {
-                    if (!try initializer.poll(self.reader, self.writer)) {
-                        return .none;
-                    }
-                    self.state = .ready;
-                    return .initialized;
-                },
-                .ready => {
-                    return self.pollReady(diagnostics);
-                },
-            }
-        }
+            self.reader.toss(message.bytes_consumed);
 
-        fn pollReady(self: *Self, diagnostics: ?*DbusErrorDiagnostics) !Response {
-            // It's easier to parse from a buffer than it is to write
-            // DbusHeader.parse in a way where it doesn't consume bytes from
-            // the reader for a partial read. Fill in outer loop as much as
-            // possible, then if the parse fails below because there wasn't
-            // enough data, we can just fill again until we return WouldBlock
-            // here
-            if (self.reader.bufferedLen() == 0) {
-                try self.reader.fillMore();
+            var reply_for: ?u32 = null;
+            var header_it = message.headerIt();
+            while (try header_it.next()) |f| {
+                if (f == .reply_serial) {
+                    reply_for = f.reply_serial;
+                }
             }
 
-            while (true) {
-                // Store time since last partial message
-                const message = ParsedMessage.parse(self.reader.buffered(), diagnostics) catch |e| switch (e) {
-                    error.EndOfStream => return .none,
-                    else => return e,
+            if (reply_for) |rf| {
+                return .{
+                    .response = .{
+                        .handle = .{ .inner = rf },
+                        .header = message,
+                    },
                 };
+            }
 
-                self.reader.toss(message.bytes_consumed);
-
-                var reply_for: ?u32 = null;
-                var header_it = message.headerIt();
-                while (try header_it.next()) |f| {
-                    if (f == .reply_serial) {
-                        reply_for = f.reply_serial;
-                    }
-                }
-
-                if (reply_for) |rf| {
-                    return .{
-                        .response = .{
-                            .handle = .{ .inner = rf },
-                            .header = message,
-                        },
-                    };
-                }
-
-                if (message.message_type == .call) {
-                    return .{
-                        .call = message,
-                    };
-                }
+            if (message.message_type == .call) {
+                return .{
+                    .call = message,
+                };
             }
         }
+    }
 };
 
 pub const DbusObject = struct {
@@ -1222,7 +1207,7 @@ pub fn ParseArray(comptime Val: type) type {
                 if (self.offs >= self.data.len) return null;
 
                 var io_reader = std.Io.Reader.fixed(self.data);
-                var reader = DbusMessageReader {
+                var reader = DbusMessageReader{
                     .reader = &io_reader,
                 };
                 reader.toss(self.offs);
@@ -1365,7 +1350,7 @@ test "generated interface spotify play pause" {
     var fixture: ConnectionFixture = undefined;
     try fixture.initPinned();
 
-    const interface = mpris.OrgMprisMediaPlayer2Player {
+    const interface = mpris.OrgMprisMediaPlayer2Player{
         .connection = &fixture.connection,
         .service = "org.mpris.MediaPlayer2.spotify",
         .object_path = "/org/mpris/MediaPlayer2",
@@ -1398,7 +1383,7 @@ test "generated interface spotify play pause" {
                     if (params.handle.inner == volume_handle.inner) {
                         break :blk try mpris.OrgMprisMediaPlayer2Player.parseGetVolumeResponse(params.header);
                     }
-                }
+                },
             }
         };
 

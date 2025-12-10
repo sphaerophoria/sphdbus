@@ -187,7 +187,6 @@ const DbusToZigTypeFormatter = struct {
             .reader = &reader,
         };
 
-
         // FIXME: Very similar to variant parsing code
         const Tag = enum {
             array,
@@ -470,7 +469,6 @@ pub fn main() !void {
                 // Unimplemented, see parseGetPropertyResponse below
                 unreachable;
             }
-
         }
 
         var property_it = interface.properties.iter();

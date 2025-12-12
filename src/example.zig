@@ -96,7 +96,7 @@ pub fn main() !void {
 
     var diagnostics = dbus.DbusErrorDiagnostics.init(try alloc.alloc(u8, 4096));
 
-    const parse_options = dbus.ParseOptions {
+    const parse_options = dbus.ParseOptions{
         .diagnostics = &diagnostics,
     };
 

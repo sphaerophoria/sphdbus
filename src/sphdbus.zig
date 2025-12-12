@@ -74,7 +74,7 @@ pub const SignatureTokenizer = struct {
             'd' => .f64,
             'g' => .signature,
             else => {
-                return makeDbusParseError2(
+                return makeDbusParseError(
                     self.diagnostics,
                     self.reader,
                     error.UnhandledSignature,
@@ -291,7 +291,13 @@ const DbusMessageReader = struct {
                         const len_bytes = try self.readU32(endianness);
                         const cp = signature_it.reader.seek;
                         const next_token = try signature_it.next() orelse {
-                            return makeDbusParseError2(diagnostics, signature_it.reader, error.InvalidArraySignature, "signature missing array type", .{},);
+                            return makeDbusParseError(
+                                diagnostics,
+                                signature_it.reader,
+                                error.InvalidArraySignature,
+                                "signature missing array type",
+                                .{},
+                            );
                         };
                         // FIXME: HACK HACK HACK
                         signature_it.reader.seek = cp;
@@ -299,14 +305,20 @@ const DbusMessageReader = struct {
                             .u64, .f64, .i64, .kv_start, .struct_start => try self.alignForwards(8),
                             .array_start, .bool, .u32, .i32, .string, .object => try self.alignForwards(4),
                             .kv_end, .struct_end => {
-                                return makeDbusParseError2(diagnostics, signature_it.reader, error.InvalidArraySignature, "{t} is not a valid array type", .{next_token});
+                                return makeDbusParseError(diagnostics, signature_it.reader, error.InvalidArraySignature, "{t} is not a valid array type", .{next_token});
                             },
                             .signature, .variant => {},
                         }
                         self.toss(len_bytes);
                     }
                     tag_stack.appendBounded(.array) catch |e| {
-                        return makeDbusParseError2(diagnostics, signature_it.reader, e, "signature is too large", .{},);
+                        return makeDbusParseError(
+                            diagnostics,
+                            signature_it.reader,
+                            e,
+                            "signature is too large",
+                            .{},
+                        );
                     };
                 },
                 .kv_start, .struct_start => {
@@ -314,7 +326,13 @@ const DbusMessageReader = struct {
                         try self.alignForwards(8);
                     }
                     tag_stack.appendBounded(.@"struct") catch |e| {
-                        return makeDbusParseError2(diagnostics, signature_it.reader, e, "signature is too large", .{},);
+                        return makeDbusParseError(
+                            diagnostics,
+                            signature_it.reader,
+                            e,
+                            "signature is too large",
+                            .{},
+                        );
                     };
                 },
                 .struct_end, .kv_end => {
@@ -414,12 +432,12 @@ pub const ParseVariant = struct {
         const expected_sig = generateDbusSignature(T);
         const actual_sig = self.data[self.variant_start + 1 .. self.variant_start + self.signature_len + 1];
         if (!std.mem.eql(u8, expected_sig, actual_sig)) {
-            return makeDbusParseError2(
+            return makeDbusParseError(
                 options.diagnostics,
                 &io_reader,
                 error.InvalidSignature,
                 "Expected signature {s} does not match actual {s}",
-                .{expected_sig, actual_sig},
+                .{ expected_sig, actual_sig },
             );
         }
 
@@ -474,7 +492,7 @@ const HeaderIt = struct {
         try dbus_reader.alignForwards(8);
         const header_field_byte = try dbus_reader.readByte();
         const header_field = std.meta.intToEnum(HeaderFieldTag, header_field_byte) catch {
-            return makeDbusParseError2(
+            return makeDbusParseError(
                 options.diagnostics,
                 &self.fixed_reader,
                 error.InvalidHeaderField,
@@ -512,7 +530,7 @@ pub const ParsedMessage = struct {
 
         const endianness_byte = try dbus_reader.readByte();
         const endianness = std.meta.intToEnum(DbusEndianness, endianness_byte) catch {
-            return makeDbusParseError2(
+            return makeDbusParseError(
                 diagnostics,
                 &io_reader,
                 error.InvalidEndianness,
@@ -522,7 +540,7 @@ pub const ParsedMessage = struct {
         };
         const message_type_byte = try dbus_reader.readByte();
         const message_type = std.meta.intToEnum(MsgType, message_type_byte) catch {
-            return makeDbusParseError2(
+            return makeDbusParseError(
                 diagnostics,
                 &io_reader,
                 error.InvalidMessageType,
@@ -533,7 +551,7 @@ pub const ParsedMessage = struct {
         const flags = try dbus_reader.readByte();
         const version_byte = try dbus_reader.readByte();
         const major_version = std.meta.intToEnum(DBusVersion, version_byte) catch {
-            return makeDbusParseError2(
+            return makeDbusParseError(
                 diagnostics,
                 &io_reader,
                 error.InvalidVersion,
@@ -999,12 +1017,12 @@ pub fn dbusParseBody(comptime T: type, message: ParsedMessage, options: ParseOpt
     const expected_sig = generateDbusSignature(T);
 
     if (!std.mem.eql(u8, signature, generateDbusSignature(T))) {
-        return makeDbusParseError2(
+        return makeDbusParseError(
             options.diagnostics,
             &reader,
             error.InvalidType,
             "type signature is {s} but parsed is {s}",
-            .{expected_sig, signature},
+            .{ expected_sig, signature },
         );
     }
 
@@ -1027,8 +1045,8 @@ pub fn dbusConnection(reader: *std.Io.Reader, writer: *std.Io.Writer) !DbusConne
     };
 }
 
-pub const ParseError = error { ParseError } || std.Io.Reader.Error;
-pub const SerializeError = error { SerializeError } || std.Io.Writer.Error;
+pub const ParseError = error{ParseError} || std.Io.Reader.Error;
+pub const SerializeError = error{SerializeError} || std.Io.Writer.Error;
 
 pub const DbusError = error{
     Unrecoverable,
@@ -1112,7 +1130,7 @@ pub const ParseOptions = struct {
     diagnostics: ?*DbusErrorDiagnostics = null,
 };
 
-fn makeDbusParseError2(diagnostics: ?*DbusErrorDiagnostics, reader: *std.Io.Reader, reason: anyerror, comptime msg: []const u8, args: anytype) error{ParseError} {
+fn makeDbusParseError(diagnostics: ?*DbusErrorDiagnostics, reader: *std.Io.Reader, reason: anyerror, comptime msg: []const u8, args: anytype) error{ParseError} {
     if (diagnostics) |d| {
         d.error_reason = reason;
         d.parse_context = reader.buffer;

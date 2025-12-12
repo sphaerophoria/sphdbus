@@ -111,13 +111,13 @@ fn getDirectChildPathName(introspection_path: []const u8, service_path: []const 
     if (service_path.len <= introspection_path.len) return null;
 
     const trimmed_introspection_path = std.mem.trimRight(u8, introspection_path, "/");
-    std.debug.print("{s}: {s}\n", .{service_path, trimmed_introspection_path});
+    std.debug.print("{s}: {s}\n", .{ service_path, trimmed_introspection_path });
     if (!std.mem.startsWith(u8, service_path, trimmed_introspection_path)) {
         return null;
     }
 
     const end_idx = std.mem.indexOfScalarPos(u8, service_path, trimmed_introspection_path.len + 1, '/') orelse service_path.len;
-    const ret = service_path[trimmed_introspection_path.len + 1..end_idx];
+    const ret = service_path[trimmed_introspection_path.len + 1 .. end_idx];
     if (ret.len == 0) return null;
     return ret;
 }
@@ -180,7 +180,7 @@ fn writeResponse(message: dbus.ParsedMessage, connection: *dbus.DbusConnection, 
         }
 
         fn definition(_: @This()) []const u8 {
-            return
+            return 
             \\<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN"
             \\"http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">
             \\<node >
@@ -247,7 +247,7 @@ pub fn main() !void {
     writer.* = stream.writer(try alloc.alloc(u8, 4096));
 
     var diagnostics = dbus.DbusErrorDiagnostics.init(try alloc.alloc(u8, 4096));
-    const parse_options = dbus.ParseOptions {
+    const parse_options = dbus.ParseOptions{
         .diagnostics = &diagnostics,
     };
     var connection = try dbus.dbusConnection(reader.interface(), &writer.interface);

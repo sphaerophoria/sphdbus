@@ -28,9 +28,9 @@ const DbusHandler = struct {
         };
     }
 
-    fn poll(self: *DbusHandler) !void {
+    fn poll(self: *DbusHandler, options: dbus.ParseOptions) !void {
         while (true) {
-            const res = try self.connection.poll();
+            const res = try self.connection.poll(options);
 
             const player = mpris.OrgMprisMediaPlayer2Player{
                 .connection = &self.connection,
@@ -48,17 +48,13 @@ const DbusHandler = struct {
                     if (res != .response) continue;
                     if (res.response.handle.inner != wait_for.inner) continue;
 
-                    const f = try std.fs.cwd().createFile("dump.bin", .{});
-                    defer f.close();
-
-                    try f.writeAll(res.response.header.body);
-
                     const parsed = try mpris.OrgMprisMediaPlayer2Player.parseGetMetadataResponse(
                         res.response.header,
+                        options,
                     );
 
                     var it = parsed.iter();
-                    while (try it.next()) |kv| {
+                    while (try it.next(options)) |kv| {
 
                         // FIXME: Probably should be part of lib?
                         const KnownSigantures = enum {
@@ -74,10 +70,10 @@ const DbusHandler = struct {
                         };
 
                         switch (parsed_sig) {
-                            .s => std.debug.print("{s}\n", .{(try kv.val.toConcrete(dbus.DbusString, res.response.header.endianness)).inner}),
-                            .t => std.debug.print("{d}\n", .{(try kv.val.toConcrete(u64, res.response.header.endianness))}),
-                            .d => std.debug.print("{d}\n", .{(try kv.val.toConcrete(f64, res.response.header.endianness))}),
-                            .i => std.debug.print("{d}\n", .{(try kv.val.toConcrete(i32, res.response.header.endianness))}),
+                            .s => std.debug.print("{s}\n", .{(try kv.val.toConcrete(dbus.DbusString, res.response.header.endianness, options)).inner}),
+                            .t => std.debug.print("{d}\n", .{(try kv.val.toConcrete(u64, res.response.header.endianness, options))}),
+                            .d => std.debug.print("{d}\n", .{(try kv.val.toConcrete(f64, res.response.header.endianness, options))}),
+                            .i => std.debug.print("{d}\n", .{(try kv.val.toConcrete(i32, res.response.header.endianness, options))}),
                         }
                     }
 
@@ -98,6 +94,23 @@ pub fn main() !void {
 
     const alloc = buf_alloc.allocator();
 
+    var diagnostics = dbus.DbusErrorDiagnostics.init(try alloc.alloc(u8, 4096));
+
+    const parse_options = dbus.ParseOptions {
+        .diagnostics = &diagnostics,
+    };
+
     var handler = try DbusHandler.init(alloc);
-    try handler.poll();
+
+    handler.poll(parse_options) catch |e| {
+        const diagnostics_msg = diagnostics.message();
+        if (diagnostics_msg.len > 0) {
+            std.log.err("{s}", .{diagnostics_msg});
+        }
+        var buf: [4096]u8 = undefined;
+        var stderr = std.fs.File.stderr().writer(&buf);
+        try diagnostics.dumpPacket(&stderr.interface);
+        try stderr.interface.flush();
+        return e;
+    };
 }

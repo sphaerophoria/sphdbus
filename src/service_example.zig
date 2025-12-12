@@ -4,9 +4,9 @@ const builtin = @import("builtin");
 const dbus = @import("sphdbus");
 const mpris = @import("mpris");
 
-fn waitForResponse(connection: *dbus.DbusConnection, handle: dbus.CallHandle) !void {
+fn waitForResponse(connection: *dbus.DbusConnection, handle: dbus.CallHandle, parse_options: dbus.ParseOptions) !void {
     while (true) {
-        const res = try connection.poll();
+        const res = try connection.poll(parse_options);
         const response = switch (res) {
             .response => |r| r,
             else => continue,
@@ -43,7 +43,7 @@ const DbusHandlerError = error{
     NoMember,
     NoInterface,
     NoHandler,
-} || std.Io.Writer.Error || std.Io.Reader.Error;
+} || dbus.DbusError || std.Io.Writer.Error || std.Io.Reader.Error;
 
 const ExpectedObjectPath = enum {
     @"/",
@@ -110,18 +110,22 @@ pub fn ObjectApi(comptime Api: type) type {
 fn getDirectChildPathName(introspection_path: []const u8, service_path: []const u8) ?[]const u8 {
     if (service_path.len <= introspection_path.len) return null;
 
-    if (!std.mem.startsWith(u8, service_path, introspection_path)) {
+    const trimmed_introspection_path = std.mem.trimRight(u8, introspection_path, "/");
+    std.debug.print("{s}: {s}\n", .{service_path, trimmed_introspection_path});
+    if (!std.mem.startsWith(u8, service_path, trimmed_introspection_path)) {
         return null;
     }
 
-    const end_idx = std.mem.indexOfScalarPos(u8, service_path, introspection_path.len, '/') orelse service_path.len;
-    return service_path[introspection_path.len..end_idx];
+    const end_idx = std.mem.indexOfScalarPos(u8, service_path, trimmed_introspection_path.len + 1, '/') orelse service_path.len;
+    const ret = service_path[trimmed_introspection_path.len + 1..end_idx];
+    if (ret.len == 0) return null;
+    return ret;
 }
 
-fn handleCommonDbusRequests(comptime Api: type, message: dbus.ParsedMessage, connection: *dbus.DbusConnection, services: []const ObjectApi(Api)) !?Api {
-    const member = (try message.getHeader(.member)) orelse return error.NoMember;
-    const interface = (try message.getHeader(.interface)) orelse return error.NoInterface;
-    const path = (try message.getHeader(.path)) orelse return error.NoPath;
+fn handleCommonDbusRequests(comptime Api: type, message: dbus.ParsedMessage, connection: *dbus.DbusConnection, services: []const ObjectApi(Api), parse_options: dbus.ParseOptions) !?Api {
+    const member = (try message.getHeader(.member, parse_options)) orelse return error.NoMember;
+    const interface = (try message.getHeader(.interface, parse_options)) orelse return error.NoInterface;
+    const path = (try message.getHeader(.path, parse_options)) orelse return error.NoPath;
 
     if (std.mem.eql(u8, interface.inner, "org.freedesktop.DBus.Introspectable") and std.mem.eql(u8, member.inner, "Introspect")) {
         var out_buf: [4096]u8 = undefined;
@@ -148,7 +152,7 @@ fn handleCommonDbusRequests(comptime Api: type, message: dbus.ParsedMessage, con
         }
 
         // FIXME: Crashy crashy crashy
-        const sender = (try message.getHeader(.sender)).?.inner;
+        const sender = (try message.getHeader(.sender, parse_options)).?.inner;
 
         std.debug.print("intrpsection response\n{s}", .{writer.buffered()});
         try connection.ret(message.serial, sender, .{
@@ -169,14 +173,14 @@ fn handleCommonDbusRequests(comptime Api: type, message: dbus.ParsedMessage, con
     return error.NoHandler;
 }
 
-fn writeResponse(message: dbus.ParsedMessage, connection: *dbus.DbusConnection) DbusHandlerError!void {
+fn writeResponse(message: dbus.ParsedMessage, connection: *dbus.DbusConnection, parse_options: dbus.ParseOptions) DbusHandlerError!void {
     const Api = struct {
         fn name(_: @This()) []const u8 {
             return "dev.sphaerophoria.TestService";
         }
 
         fn definition(_: @This()) []const u8 {
-            return 
+            return
             \\<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN"
             \\"http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">
             \\<node >
@@ -197,16 +201,16 @@ fn writeResponse(message: dbus.ParsedMessage, connection: *dbus.DbusConnection) 
         },
     };
 
-    _ = (try handleCommonDbusRequests(Api, message, connection, &services)) orelse return;
+    _ = (try handleCommonDbusRequests(Api, message, connection, &services, parse_options)) orelse return;
 
     // FIXME: duplicated?
-    const member = (try message.getHeader(.member)) orelse return error.NoMember;
+    const member = (try message.getHeader(.member, parse_options)) orelse return error.NoMember;
     if (!std.mem.eql(u8, member.inner, "Hello")) {
         return error.Unimplemented;
     }
 
     // FIXME: Crashy crashy crashy
-    const sender = (try message.getHeader(.sender)).?.inner;
+    const sender = (try message.getHeader(.sender, parse_options)).?.inner;
 
     try connection.err(
         message.serial,
@@ -242,8 +246,12 @@ pub fn main() !void {
     const writer = try alloc.create(std.net.Stream.Writer);
     writer.* = stream.writer(try alloc.alloc(u8, 4096));
 
+    var diagnostics = dbus.DbusErrorDiagnostics.init(try alloc.alloc(u8, 4096));
+    const parse_options = dbus.ParseOptions {
+        .diagnostics = &diagnostics,
+    };
     var connection = try dbus.dbusConnection(reader.interface(), &writer.interface);
-    while (try connection.poll() != .initialized) {}
+    while (try connection.poll(parse_options) != .initialized) {}
 
     // FIXME: This needs a nice API somewhere probably...
     const handle = try connection.call(
@@ -257,10 +265,10 @@ pub fn main() !void {
         },
     );
 
-    try waitForResponse(&connection, handle);
+    try waitForResponse(&connection, handle, parse_options);
 
     while (true) {
-        const res = try connection.poll();
+        const res = try connection.poll(parse_options);
         const params = switch (res) {
             .call => |params| params,
             else => continue,
@@ -274,7 +282,7 @@ pub fn main() !void {
         // Packet parse
 
         std.debug.print("someone is asking us for something {any}\n", .{params});
-        try writeResponse(params, &connection);
+        try writeResponse(params, &connection, parse_options);
     }
 
     std.debug.print("done\n", .{});

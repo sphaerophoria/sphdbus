@@ -185,6 +185,7 @@ const DbusToZigTypeFormatter = struct {
         var reader = std.Io.Reader.fixed(self.typ);
         var tokenizer = dbus.SignatureTokenizer{
             .reader = &reader,
+            .diagnostics = null,
         };
 
         // FIXME: Very similar to variant parsing code
@@ -263,7 +264,10 @@ fn isTypeSupported(name: []const u8, typ: []const u8) bool {
     }
 
     var signature_reader = std.Io.Reader.fixed(typ);
-    var tokenizer = dbus.SignatureTokenizer{ .reader = &signature_reader };
+    var tokenizer = dbus.SignatureTokenizer{
+        .reader = &signature_reader,
+        .diagnostics = null,
+    };
     while (true) {
         _ = tokenizer.next() catch {
             std.log.warn("Failed to tokenize signature {s}, skipping method {s}", .{ typ, name });
@@ -493,9 +497,10 @@ pub fn main() !void {
                 \\
                 \\            pub fn @"parseGet{[property_name]s}Response"(
                 \\                message: dbus.ParsedMessage,
+                \\                options: dbus.ParseOptions,
                 \\            ) !{[zig_type]f} {{
-                \\                const v = try dbus.dbusParseBody(dbus.ParseVariant, message);
-                \\                return v.toConcrete({[zig_type]f}, message.endianness);
+                \\                const v = try dbus.dbusParseBody(dbus.ParseVariant, message, options);
+                \\                return v.toConcrete({[zig_type]f}, message.endianness, options);
                 \\            }}
                 \\
                 \\            pub fn @"set{[property_name]s}Property"(

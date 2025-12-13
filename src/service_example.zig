@@ -18,34 +18,6 @@ fn waitForResponse(connection: *dbus.DbusConnection, handle: dbus.CallHandle, pa
 
 const service_object = "/dev/sphaerophoria/TestService";
 
-// FIXME: This seems unreasonable. Less errors and more diagnostics might be a
-// better play
-//
-// Errors that result in returning an error to the caller
-//    * Error message and dbus type conversion
-// Errors that result in us shutting down our dbus connection
-// Errors that are unrecoverable?
-// Blocking/nonblocking errors
-const DbusHandlerError = error{
-    InvalidHeaderField,
-    // FIXME: Path -> Object?
-    NoPath,
-    UnexpectedPath,
-    Unimplemented,
-    OutOfMemory,
-    UnknownTag,
-    InvalidLen,
-    Uninitialized,
-    InvalidCall,
-    InvalidSignature,
-    UnhandledSignature,
-    InvalidArraySignature,
-    NoMember,
-    NoInterface,
-    NoHandler,
-    NoSender,
-} || dbus.DbusError || std.Io.Writer.Error || std.Io.Reader.Error;
-
 const ExpectedObjectPath = enum {
     @"/",
     @"/dev",
@@ -61,37 +33,6 @@ const ExpectedObjectPath = enum {
         }
     }
 };
-
-fn handleIntrospectionOnlyPath(message: dbus.ParsedMessage, path: ExpectedObjectPath, connection: *dbus.DbusConnection) DbusHandlerError!void {
-    // FIXME: Why would we iterate the header list once per field idiot
-    const member = try message.getHeader(.member) orelse return error.InvalidCall;
-    const interface = try message.getHeader(.interface) orelse return error.InvalidCall;
-
-    if (!std.mem.eql(u8, interface.inner, "org.freedesktop.DBus.Introspectable")) {
-        return error.Unimplemented;
-    }
-
-    if (!std.mem.eql(u8, member.inner, "Introspect")) {
-        return error.Unimplemented;
-    }
-
-    var out_buf: [4096]u8 = undefined;
-    var writer = std.Io.Writer.fixed(&out_buf);
-    try writer.print(
-        \\<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN"
-        \\"http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">
-        \\<node >
-        \\  <node name="{s}"/>
-        \\</node>
-    , .{path.child()});
-
-    // FIXME: Crashy crashy crashy
-    const sender = (try message.getHeader(.sender)).?.inner;
-
-    try connection.ret(message.serial, sender, .{
-        dbus.DbusString{ .inner = writer.buffered() },
-    });
-}
 
 pub fn ObjectApi(comptime Api: type) type {
     if (!@hasDecl(Api, "name")) {
@@ -127,12 +68,20 @@ fn handleCommonDbusRequests(comptime Api: type, message: dbus.ParsedMessage, con
     const member = message.headers.member orelse return error.NoMember;
     const interface = message.headers.interface orelse return error.NoInterface;
     const path = message.headers.path orelse return error.NoPath;
+    const sender = message.headers.sender orelse return error.NoSender;
 
     if (std.mem.eql(u8, interface.inner, "org.freedesktop.DBus.Introspectable") and std.mem.eql(u8, member.inner, "Introspect")) {
         var out_buf: [4096]u8 = undefined;
         var writer = std.Io.Writer.fixed(&out_buf);
 
         for (services) |service| {
+            if (std.mem.eql(u8, service.path, path.inner)) {
+                try connection.ret(message.serial, sender.inner, .{
+                    dbus.DbusString{ .inner = service.api.definition() },
+                });
+
+                return null;
+            }
             try writer.writeAll(
                 \\<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN"
                 \\"http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">
@@ -152,15 +101,9 @@ fn handleCommonDbusRequests(comptime Api: type, message: dbus.ParsedMessage, con
             );
         }
 
-        // FIXME: Crashy crashy crashy
-        const sender = (message.headers.sender orelse return error.NoSender).inner;
-
-        std.debug.print("intrpsection response\n{s}", .{writer.buffered()});
-        try connection.ret(message.serial, sender, .{
+        try connection.ret(message.serial, sender.inner, .{
             dbus.DbusString{ .inner = writer.buffered() },
         });
-
-        // Is path that they gave us an ancestor of any of our paths
 
         return null;
     }
@@ -171,10 +114,17 @@ fn handleCommonDbusRequests(comptime Api: type, message: dbus.ParsedMessage, con
         }
     }
 
-    return error.NoHandler;
+    try connection.err(
+        message.serial,
+        sender.inner,
+        .{ .inner = "org.freedesktop.DBus.Error.UnknownObject" },
+        dbus.DbusString{ .inner = "unknown object" },
+    );
+
+    return null;
 }
 
-fn writeResponse(message: dbus.ParsedMessage, connection: *dbus.DbusConnection) DbusHandlerError!void {
+fn writeResponse(message: dbus.ParsedMessage, connection: *dbus.DbusConnection) !void {
     const Api = struct {
         fn name(_: @This()) []const u8 {
             return "dev.sphaerophoria.TestService";
@@ -205,32 +155,40 @@ fn writeResponse(message: dbus.ParsedMessage, connection: *dbus.DbusConnection) 
     _ = (try handleCommonDbusRequests(Api, message, connection, &services)) orelse return;
 
     const member = message.headers.member orelse return error.NoMember;
+    const sender = message.headers.sender orelse return error.NoSender;
+
     if (!std.mem.eql(u8, member.inner, "Hello")) {
-        return error.Unimplemented;
+        try connection.err(
+            message.serial,
+            sender.inner,
+            .{ .inner = "org.freedesktop.DBus.Error.UnknownMethod" },
+            dbus.DbusString{ .inner = "unknown method" },
+        );
     }
 
-    // FIXME: Crashy crashy crashy
-    const sender = (message.headers.sender orelse return error.NoSender).inner;
 
-    try connection.err(
+    try connection.ret(
         message.serial,
-        sender,
-        .{ .inner = "dev.sphaerophoria.TestService.Error" },
-        dbus.DbusString{ .inner = "Something went terribly wrong" },
+        sender.inner,
+        dbus.DbusString{ .inner = "Hello world" },
     );
 }
 
-const api =
-    \\<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN"
-    \\"http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">
-    \\<node >
-    \\  <interface name="dev.sphaerophoria.TestService">
-    \\    <method name="Hello">
-    \\      <arg direction="out" type="s"/>
-    \\    </method>
-    \\  </interface>
-    \\</node>
-;
+fn dumpDiagnostics(diagnostics: dbus.DbusErrorDiagnostics) !void {
+    const msg = diagnostics.message();
+    if (msg.len > 0) {
+        std.log.err("{s}", .{msg});
+    }
+
+    var buf: [8192]u8 = undefined;
+    var bufw = std.Io.Writer.fixed(&buf);
+    try diagnostics.dumpPacket(&bufw);
+
+    const written = bufw.buffered();
+    if (written.len > 0) {
+        std.log.err("\n{s}", .{written});
+    }
+}
 
 pub fn main() !void {
     var alloc_buf: [1 * 1024 * 1024]u8 = undefined;
@@ -267,21 +225,45 @@ pub fn main() !void {
     try waitForResponse(&connection, handle, parse_options);
 
     while (true) {
-        const res = try connection.poll(parse_options);
+        diagnostics.reset();
+
+        const res = connection.poll(parse_options) catch |e| switch (e) {
+            error.Unrecoverable => {
+                std.log.err("Unrecoverable error, shutting down", .{});
+                try dumpDiagnostics(diagnostics);
+                break;
+            },
+            error.ParseError => {
+                try dumpDiagnostics(diagnostics);
+                break;
+            },
+            error.EndOfStream, error.WriteFailed, error.ReadFailed => {
+                std.log.info("IO failure, shutting down", .{});
+                break;
+            },
+        };
+
         const params = switch (res) {
             .call => |params| params,
             else => continue,
         };
 
-        // Dbus service
-        //
-        // RecoverableError -- Report error somehow?
-        // FatalError -- I've parsed 1/10th of a packet and don't know how to consume the rest
-        //
-        // Packet parse
-
-        std.debug.print("someone is asking us for something {any}\n", .{params});
-        try writeResponse(params, &connection);
+        writeResponse(params, &connection) catch |e| switch (e) {
+            error.WriteFailed => {
+                std.log.info("IO failure, shutting down", .{});
+                break;
+            },
+            error.OutOfMemory => {
+                std.log.err("Internal oom error, dropping response", .{});
+            },
+            error.SerializeError => {
+                std.log.err("Internal serialization error, dropping response", .{});
+            },
+            error.NoMember, error.NoInterface, error.NoPath, error.NoSender => {
+                std.log.err("Invalid request ({t}), dropping response", .{e});
+            },
+            error.Uninitialized => unreachable,
+        };
     }
 
     std.debug.print("done\n", .{});

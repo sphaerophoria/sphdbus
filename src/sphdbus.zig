@@ -14,10 +14,10 @@ fn extractUnixPathFromAddress(address: []const u8) ![]const u8 {
     return address[tag.len..];
 }
 
-fn waitForStartsWith(reader: *std.Io.Reader, start: []const u8, err: DbusError) DbusError!void {
+fn waitForStartsWith(reader: *std.Io.Reader, start: []const u8, err: PollError) PollError!void {
     const response = reader.takeDelimiterInclusive('\n') catch |e| switch (e) {
         error.EndOfStream, error.ReadFailed => |t| return t,
-        error.StreamTooLong => return DbusError.ParseError,
+        error.StreamTooLong => return PollError.ParseError,
     };
 
     if (!std.mem.startsWith(u8, response, start)) {
@@ -722,7 +722,7 @@ pub const DbusHeader = struct {
         };
     }
 
-    fn serialize(self: DbusHeader, io_writer: *std.Io.Writer, body: anytype) DbusError!void {
+    fn serialize(self: DbusHeader, io_writer: *std.Io.Writer, body: anytype) SerializeError!void {
         // We don't handle this below I don't think
         std.debug.assert(self.endianness == .little);
 
@@ -831,7 +831,7 @@ pub const DbusConnectionInitializer = struct {
         };
     }
 
-    fn poll(self: *DbusConnectionInitializer, io_reader: *std.Io.Reader, io_writer: *std.Io.Writer) DbusError!bool {
+    fn poll(self: *DbusConnectionInitializer, io_reader: *std.Io.Reader, io_writer: *std.Io.Writer) PollError!bool {
         sw: switch (self.state) {
             .wait_for_ok => {
                 try waitForStartsWith(io_reader, "OK", error.ParseError);
@@ -861,7 +861,9 @@ pub const DbusConnectionInitializer = struct {
                         .{ .member = .{ .inner = "Hello" } },
                     },
                 };
-                try hello_message.serialize(io_writer, .{});
+                hello_message.serialize(io_writer, .{}) catch {
+                    return error.Unrecoverable;
+                };
                 try io_writer.flush();
 
                 self.state = .complete;
@@ -1056,9 +1058,9 @@ pub fn dbusConnection(reader: *std.Io.Reader, writer: *std.Io.Writer) !DbusConne
 pub const ParseError = error{ParseError} || std.Io.Reader.Error;
 pub const SerializeError = error{SerializeError} || std.Io.Writer.Error;
 
-pub const DbusError = error{
+pub const PollError = error{
     Unrecoverable,
-} || ParseError || SerializeError;
+} || ParseError || std.Io.Writer.Error;
 
 pub const DbusErrorDiagnostics = struct {
     // FIXME: Maybe an enum instead of polluting error space?
@@ -1078,6 +1080,13 @@ pub const DbusErrorDiagnostics = struct {
             .message_buf = message_buf,
             .message_len = 0,
         };
+    }
+
+    pub fn reset(self: *DbusErrorDiagnostics) void {
+        self.error_reason = null;
+        self.parse_context = &.{};
+        self.error_pos = 0;
+        self.message_len = 0;
     }
 
     pub fn message(self: DbusErrorDiagnostics) []const u8 {
@@ -1256,7 +1265,7 @@ pub const DbusConnection = struct {
         }
     }
 
-    fn pollReady(self: *Self, options: ParseOptions) DbusError!Response {
+    fn pollReady(self: *Self, options: ParseOptions) PollError!Response {
         // It's easier to parse from a buffer than it is to write
         // DbusHeader.parse in a way where it doesn't consume bytes from
         // the reader for a partial read. Fill in outer loop as much as

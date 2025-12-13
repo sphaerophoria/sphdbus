@@ -578,7 +578,7 @@ pub const ParsedMessage = struct {
         try dbus_reader.alignForwards(8);
 
         const header_buf = try dbus_reader.readBytes(header_field_len);
-        var header_it = HeaderIt {
+        var header_it = HeaderIt{
             .endianness = endianness,
             .fixed_reader = std.Io.Reader.fixed(header_buf),
         };
@@ -587,7 +587,7 @@ pub const ParsedMessage = struct {
         while (try header_it.next(.{ .diagnostics = diagnostics })) |f| switch (f) {
             inline else => |v, t| {
                 @field(headers, @tagName(t)) = v;
-            }
+            },
         };
 
         try dbus_reader.alignForwards(8);

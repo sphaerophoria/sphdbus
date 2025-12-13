@@ -131,7 +131,7 @@ fn writeResponse(message: dbus.ParsedMessage, connection: *dbus.DbusConnection) 
         }
 
         fn definition(_: @This()) []const u8 {
-            return
+            return 
             \\<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN"
             \\"http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">
             \\<node >
@@ -165,7 +165,6 @@ fn writeResponse(message: dbus.ParsedMessage, connection: *dbus.DbusConnection) 
             dbus.DbusString{ .inner = "unknown method" },
         );
     }
-
 
     try connection.ret(
         message.serial,

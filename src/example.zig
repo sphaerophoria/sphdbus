@@ -63,7 +63,7 @@ const DbusHandler = struct {
                             d,
                             i,
                         };
-                        std.debug.print("{s}: ", .{kv.key.inner});
+
                         const parsed_sig = std.meta.stringToEnum(KnownSigantures, kv.val.signature()) orelse {
                             std.debug.print("(cannot print {s})\n", .{kv.val.signature()});
                             continue;

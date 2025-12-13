@@ -43,6 +43,7 @@ const DbusHandlerError = error{
     NoMember,
     NoInterface,
     NoHandler,
+    NoSender,
 } || dbus.DbusError || std.Io.Writer.Error || std.Io.Reader.Error;
 
 const ExpectedObjectPath = enum {
@@ -122,10 +123,10 @@ fn getDirectChildPathName(introspection_path: []const u8, service_path: []const 
     return ret;
 }
 
-fn handleCommonDbusRequests(comptime Api: type, message: dbus.ParsedMessage, connection: *dbus.DbusConnection, services: []const ObjectApi(Api), parse_options: dbus.ParseOptions) !?Api {
-    const member = (try message.getHeader(.member, parse_options)) orelse return error.NoMember;
-    const interface = (try message.getHeader(.interface, parse_options)) orelse return error.NoInterface;
-    const path = (try message.getHeader(.path, parse_options)) orelse return error.NoPath;
+fn handleCommonDbusRequests(comptime Api: type, message: dbus.ParsedMessage, connection: *dbus.DbusConnection, services: []const ObjectApi(Api)) !?Api {
+    const member = message.headers.member orelse return error.NoMember;
+    const interface = message.headers.interface orelse return error.NoInterface;
+    const path = message.headers.path orelse return error.NoPath;
 
     if (std.mem.eql(u8, interface.inner, "org.freedesktop.DBus.Introspectable") and std.mem.eql(u8, member.inner, "Introspect")) {
         var out_buf: [4096]u8 = undefined;
@@ -152,7 +153,7 @@ fn handleCommonDbusRequests(comptime Api: type, message: dbus.ParsedMessage, con
         }
 
         // FIXME: Crashy crashy crashy
-        const sender = (try message.getHeader(.sender, parse_options)).?.inner;
+        const sender = (message.headers.sender orelse return error.NoSender).inner;
 
         std.debug.print("intrpsection response\n{s}", .{writer.buffered()});
         try connection.ret(message.serial, sender, .{
@@ -173,14 +174,14 @@ fn handleCommonDbusRequests(comptime Api: type, message: dbus.ParsedMessage, con
     return error.NoHandler;
 }
 
-fn writeResponse(message: dbus.ParsedMessage, connection: *dbus.DbusConnection, parse_options: dbus.ParseOptions) DbusHandlerError!void {
+fn writeResponse(message: dbus.ParsedMessage, connection: *dbus.DbusConnection) DbusHandlerError!void {
     const Api = struct {
         fn name(_: @This()) []const u8 {
             return "dev.sphaerophoria.TestService";
         }
 
         fn definition(_: @This()) []const u8 {
-            return 
+            return
             \\<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN"
             \\"http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">
             \\<node >
@@ -201,16 +202,15 @@ fn writeResponse(message: dbus.ParsedMessage, connection: *dbus.DbusConnection, 
         },
     };
 
-    _ = (try handleCommonDbusRequests(Api, message, connection, &services, parse_options)) orelse return;
+    _ = (try handleCommonDbusRequests(Api, message, connection, &services)) orelse return;
 
-    // FIXME: duplicated?
-    const member = (try message.getHeader(.member, parse_options)) orelse return error.NoMember;
+    const member = message.headers.member orelse return error.NoMember;
     if (!std.mem.eql(u8, member.inner, "Hello")) {
         return error.Unimplemented;
     }
 
     // FIXME: Crashy crashy crashy
-    const sender = (try message.getHeader(.sender, parse_options)).?.inner;
+    const sender = (message.headers.sender orelse return error.NoSender).inner;
 
     try connection.err(
         message.serial,
@@ -253,7 +253,6 @@ pub fn main() !void {
     var connection = try dbus.dbusConnection(reader.interface(), &writer.interface);
     while (try connection.poll(parse_options) != .initialized) {}
 
-    // FIXME: This needs a nice API somewhere probably...
     const handle = try connection.call(
         "/org/freedesktop/DBus",
         "org.freedesktop.DBus",
@@ -282,7 +281,7 @@ pub fn main() !void {
         // Packet parse
 
         std.debug.print("someone is asking us for something {any}\n", .{params});
-        try writeResponse(params, &connection, parse_options);
+        try writeResponse(params, &connection);
     }
 
     std.debug.print("done\n", .{});

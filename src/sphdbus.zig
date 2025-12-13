@@ -474,6 +474,17 @@ pub const HeaderField = union(HeaderFieldTag) {
     signature: DbusSignature,
 };
 
+pub const Headers = struct {
+    path: ?DbusObject = null,
+    interface: ?DbusString = null,
+    member: ?DbusString = null,
+    error_name: ?DbusString = null,
+    reply_serial: ?u32 = null,
+    destination: ?DbusString = null,
+    sender: ?DbusString = null,
+    signature: ?DbusSignature = null,
+};
+
 const HeaderIt = struct {
     endianness: DbusEndianness,
     fixed_reader: std.Io.Reader,
@@ -517,7 +528,7 @@ pub const ParsedMessage = struct {
     flags: u8,
     major_version: DBusVersion,
     serial: u32,
-    header_buf: []const u8,
+    headers: Headers,
     body: []const u8,
     bytes_consumed: usize,
 
@@ -565,7 +576,19 @@ pub const ParsedMessage = struct {
         const header_field_len = try dbus_reader.readU32(endianness);
 
         try dbus_reader.alignForwards(8);
+
         const header_buf = try dbus_reader.readBytes(header_field_len);
+        var header_it = HeaderIt {
+            .endianness = endianness,
+            .fixed_reader = std.Io.Reader.fixed(header_buf),
+        };
+
+        var headers = Headers{};
+        while (try header_it.next(.{ .diagnostics = diagnostics })) |f| switch (f) {
+            inline else => |v, t| {
+                @field(headers, @tagName(t)) = v;
+            }
+        };
 
         try dbus_reader.alignForwards(8);
         const body = try dbus_reader.readBytes(body_len);
@@ -576,33 +599,10 @@ pub const ParsedMessage = struct {
             .flags = flags,
             .major_version = major_version,
             .serial = serial,
-            .header_buf = header_buf,
+            .headers = headers,
             .body = body,
             .bytes_consumed = dbus_reader.reader.seek,
         };
-    }
-
-    pub fn headerIt(self: *const ParsedMessage) HeaderIt {
-        return .{
-            .endianness = self.endianness,
-            .fixed_reader = std.Io.Reader.fixed(self.header_buf),
-        };
-    }
-
-    pub fn getHeader(self: ParsedMessage, comptime header: HeaderFieldTag, options: ParseOptions) !?@FieldType(HeaderField, @tagName(header)) {
-        var it = self.headerIt();
-        while (try it.next(options)) |f| {
-            if (f == header) {
-                return @field(f, @tagName(header));
-            }
-        }
-
-        return null;
-    }
-
-    pub fn signature(self: ParsedMessage, options: ParseOptions) ![]const u8 {
-        const s = try self.getHeader(.signature, options) orelse return "";
-        return s.inner;
     }
 };
 
@@ -1013,16 +1013,24 @@ pub fn dbusParseBodyInner(comptime T: type, endianness: DbusEndianness, dr: *Dbu
 pub fn dbusParseBody(comptime T: type, message: ParsedMessage, options: ParseOptions) ParseError!T {
     var reader = std.Io.Reader.fixed(message.body);
 
-    const signature = try message.signature(options);
+    const signature = message.headers.signature orelse return {
+        return makeDbusParseError(
+            options.diagnostics,
+            &reader,
+            error.NoSignature,
+            "parsing element with no signature",
+            .{},
+        );
+    };
     const expected_sig = generateDbusSignature(T);
 
-    if (!std.mem.eql(u8, signature, generateDbusSignature(T))) {
+    if (!std.mem.eql(u8, signature.inner, generateDbusSignature(T))) {
         return makeDbusParseError(
             options.diagnostics,
             &reader,
             error.InvalidType,
             "type signature is {s} but parsed is {s}",
-            .{ expected_sig, signature },
+            .{ expected_sig, signature.inner },
         );
     }
 
@@ -1276,22 +1284,10 @@ pub const DbusConnection = struct {
 
             self.reader.toss(message.bytes_consumed);
 
-            var reply_for: ?u32 = null;
-
-            var header_it = message.headerIt();
-
-            while (true) {
-                const f = try header_it.next(options) orelse break;
-
-                if (f == .reply_serial) {
-                    reply_for = f.reply_serial;
-                }
-            }
-
-            if (reply_for) |rf| {
+            if (message.headers.reply_serial) |rs| {
                 return .{
                     .response = .{
-                        .handle = .{ .inner = rf },
+                        .handle = .{ .inner = rs },
                         .header = message,
                     },
                 };

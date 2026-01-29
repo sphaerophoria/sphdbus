@@ -33,17 +33,6 @@ fn isPropertySupported(property: DbusSchemaParser.Property) bool {
     return true;
 }
 
-fn needsAllocation(signature: []const u8) !bool {
-    var signature_reader = std.Io.Reader.fixed(signature);
-    var tokenizer = dbus.SignatureTokenizer{ .reader = &signature_reader };
-    while (try tokenizer.next()) |t| {
-        // Fairly sure the only reason we need allocations is to convert dbus
-        // arrays to zig slices
-        if (t == .array_start) return true;
-    }
-    return false;
-}
-
 fn isMethodSupported(method: DbusSchemaParser.Method) bool {
     var arg_it = method.args.iter();
     while (arg_it.next()) |arg| {

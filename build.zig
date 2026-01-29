@@ -63,7 +63,6 @@ pub fn build(b: *std.Build) !void {
     });
     generate_service.root_module.addImport("sphtud", sphtud);
 
-    // FIXME: Holy crap so much code in build.zig unparsable by any human
     const run_generate_mpris_service = b.addRunArtifact(generate_service);
     run_generate_mpris_service.addFileArg(b.path("res/mpris_serivce.xml"));
     const mpris_service_file = run_generate_mpris_service.addOutputFileArg("mpris.zig");
@@ -100,7 +99,6 @@ pub fn build(b: *std.Build) !void {
         .name = "dbus_tests",
         .root_module = dbus_mod,
     });
-    dbus_tests.use_llvm = true;
     dbus_tests.root_module.addImport("sphtud", sphtud);
     dbus_tests.root_module.addImport("mpris", mpris_mod);
     dbus_tests.root_module.addImport("mpris_service", mpris_service_mod);

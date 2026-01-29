@@ -1,7 +1,3 @@
-//
-// FIXME: All these w.prints() are so hard to parse, maybe give names to what
-// we are trying to achieve
-//
 const std = @import("std");
 const sphtud = @import("sphtud");
 const DbusSchemaParser = @import("DbusSchemaParser.zig");
@@ -159,7 +155,6 @@ fn indentPrinter(w: *std.Io.Writer, comptime indent_level: usize) IndentPrinter(
     };
 }
 
-// FIXME: move into sphtud
 const zig_writer = struct {
     pub const OpenOptions = struct {
         public: bool = false,
@@ -322,7 +317,6 @@ fn genInterfaceMethod(method: *DbusSchemaParser.Method, p: anytype) !void {
 fn genDocstring(reader: *std.fs.File.Reader, interface: *DbusSchemaParser.Interface, p: anytype) !void {
     try reader.seekTo(interface.xml_start);
 
-    // FIXME: Remove any node starting with tp: to remove all the useless docs
     try reader.seekTo(interface.xml_start);
 
     const xml_len = interface.xml_end - interface.xml_start;

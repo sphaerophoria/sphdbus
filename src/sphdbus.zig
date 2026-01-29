@@ -240,11 +240,6 @@ const DbusMessageReader = struct {
         try self.reader.discardAll(new_pos - self.reader.seek);
     }
 
-    fn dupeIfAlloc(alloc: ?std.mem.Allocator, comptime T: type, val: []const T) ![]const T {
-        const a = alloc orelse return val;
-        return try a.dupe(T, val);
-    }
-
     fn readSignature(self: *DbusMessageReader) ![]const u8 {
         const signature_len = try self.readByte();
         return (try self.readBytes(signature_len + 1))[0..signature_len];
@@ -1047,7 +1042,6 @@ pub fn dbusParseBody(comptime T: type, message: ParsedMessage, options: ParseOpt
         .reader = &reader,
     };
 
-    // FIXME: null diagnostics seems wrong
     return dbusParseBodyInner(T, message.endianness, &dr, options.diagnostics);
 }
 

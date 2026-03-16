@@ -896,6 +896,21 @@ pub const DbusConnectionInitializer = struct {
     }
 };
 
+fn dbusArraySize(val: anytype) !u32 {
+    var writer_buf: [4096]u8 = undefined;
+    var writer = std.Io.Writer.Discarding.init(&writer_buf);
+
+    var dw = DbusMessageWriter{
+        .pos = 0,
+        .writer = &writer.writer,
+    };
+
+    for (val) |item| {
+        try dbusSerializeInner(&dw, item);
+    }
+    return @intCast(writer.fullCount());
+}
+
 fn dbusSerializeInner(dbus_writer: *DbusMessageWriter, val: anytype) !void {
     switch (@TypeOf(val)) {
         DbusString, DbusObject => {
@@ -925,6 +940,15 @@ fn dbusSerializeInner(dbus_writer: *DbusMessageWriter, val: anytype) !void {
     }
 
     switch (@typeInfo(@TypeOf(val))) {
+        .pointer => {
+            const serialized_size = try dbusArraySize(val);
+            try dbus_writer.writeU32(serialized_size);
+
+            for (val) |child| {
+                try dbusSerializeInner(dbus_writer, child);
+            }
+            return;
+        },
         .@"struct" => |si| {
             if (@hasDecl(@TypeOf(val), "DbusVariantMarker")) {
                 try dbus_writer.writeVariant(val.inner);
@@ -940,6 +964,42 @@ fn dbusSerializeInner(dbus_writer: *DbusMessageWriter, val: anytype) !void {
     }
 
     @compileError("Unhandled type " ++ @typeName(@TypeOf(val)));
+}
+
+test "array back and forth" {
+    const Item = struct {
+        id: DbusString,
+        name: DbusString,
+    };
+
+    const to_serialize: []const Item = &.{
+        .{ .id = .{ .inner = "hello" }, .name = .{ .inner = "world" } },
+        .{ .id = .{ .inner = "goodbye" }, .name = .{ .inner = "world2" } },
+    };
+
+    var msg: [4096]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&msg);
+
+    try dbusSerialize(&writer, to_serialize);
+
+    var reader = std.Io.Reader.fixed(msg[0..writer.end]);
+    var dr = DbusMessageReader{
+        .reader = &reader,
+    };
+
+    const parsed = try dbusParseBodyInner(ParseArray(Item), .little, &dr, null);
+
+    var it = parsed.iter();
+
+    const first = try it.next(.{}) orelse return error.MissingItem;
+    try std.testing.expectEqualStrings("hello", first.id.inner);
+    try std.testing.expectEqualStrings("world", first.name.inner);
+
+    const second = try it.next(.{}) orelse return error.MissingItem;
+    try std.testing.expectEqualStrings("goodbye", second.id.inner);
+    try std.testing.expectEqualStrings("world2", second.name.inner);
+
+    try std.testing.expectEqual(null, try it.next(.{}));
 }
 
 fn dbusSerialize(io_writer: *std.Io.Writer, val: anytype) !void {

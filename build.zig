@@ -1,5 +1,20 @@
 const std = @import("std");
 
+pub fn genService(b: *std.Build, me: *std.Build.Dependency, path: std.Build.LazyPath) *std.Build.Module {
+    const gen_service = me.artifact("generate_service");
+    const sphdbus_mod = me.module("sphdbus");
+
+    const run_gen_service = b.addRunArtifact(gen_service);
+    run_gen_service.addFileArg(path);
+    const test_service_path = run_gen_service.addOutputFileArg("test_service.zig");
+
+    const test_service_mod = b.createModule(.{
+        .root_source_file = test_service_path,
+    });
+    test_service_mod.addImport("sphdbus", sphdbus_mod);
+    return test_service_mod;
+}
+
 pub const ClientGenerator = struct {
     b: *std.Build,
     exe: *std.Build.Step.Compile,

@@ -1041,6 +1041,7 @@ fn getDbusAlignment(comptime T: type) u32 {
 
 pub fn dbusParseBodyInner(comptime T: type, endianness: DbusEndianness, dr: *DbusMessageReader, diagnostics: ?*DbusErrorDiagnostics) ParseError!T {
     switch (T) {
+        void => return {},
         DbusObject, DbusString => {
             const string_len = try dr.readU32(endianness);
             // Known that string content lives in body, so it's ok
@@ -1104,15 +1105,7 @@ pub fn dbusParseBodyInner(comptime T: type, endianness: DbusEndianness, dr: *Dbu
 pub fn dbusParseBody(comptime T: type, message: ParsedMessage, options: ParseOptions) ParseError!T {
     var reader = std.Io.Reader.fixed(message.body);
 
-    const signature = message.headers.signature orelse return {
-        return makeDbusParseError(
-            options.diagnostics,
-            &reader,
-            error.NoSignature,
-            "parsing element with no signature",
-            .{},
-        );
-    };
+    const signature = message.headers.signature orelse DbusSignature{ .inner = "" };
     const expected_sig = generateDbusSignature(T);
 
     if (!std.mem.eql(u8, signature.inner, generateDbusSignature(T))) {
@@ -1465,6 +1458,7 @@ pub fn ParseArray(comptime Val: type) type {
 
 fn generateDbusSignatureInner(comptime T: type, depth: usize) []const u8 {
     switch (T) {
+        void => return "",
         DbusString => return "s",
         DbusObject => return "o",
         DbusSignature => return "g",

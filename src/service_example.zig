@@ -3,7 +3,7 @@ const sphtud = @import("sphtud");
 const builtin = @import("builtin");
 const dbus = @import("sphdbus");
 const mpris = @import("mpris");
-const service_def = @import("test_service.zig");
+const service_def = @import("test_service");
 
 fn waitForResponse(connection: *dbus.DbusConnection, handle: dbus.CallHandle, parse_options: dbus.ParseOptions) !void {
     while (true) {
@@ -51,6 +51,13 @@ fn writeResponse(scratch: std.mem.Allocator, message: dbus.ParsedMessage, connec
                             message.serial,
                             message.headers.sender.?.inner,
                             dbus.DbusString{ .inner = s },
+                        );
+                    },
+                    .CallMe => |_| {
+                        try connection.ret(
+                            message.serial,
+                            message.headers.sender.?.inner,
+                            dbus.DbusString{ .inner = "maybe" },
                         );
                     },
                 },

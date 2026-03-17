@@ -394,25 +394,21 @@ fn genInterface(reader: *std.fs.File.Reader, interface: *DbusSchemaParser.Interf
     try zw.closeUnionField(p);
 }
 
-fn openRelativeFile(base_path: []const u8, interface_path: []const u8) !std.fs.File {
-    var full_relative_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-
-    const full_relative_path = try std.fmt.bufPrint(
-        &full_relative_path_buf,
+fn resolveFullPath(base_path: []const u8, interface_path: []const u8, out_buf: []u8) ![]const u8 {
+    return try std.fmt.bufPrint(
+        out_buf,
         "{f}",
         .{
             std.fs.path.fmtJoin(&.{ base_path, interface_path }),
         },
     );
-
-    return try std.fs.cwd().openFile(full_relative_path, .{});
 }
 
-fn genInterfaces(alloc: sphtud.alloc.LinearAllocator, base_path: []const u8, interface_path: []const u8, p: anytype) !void {
+fn genInterfaces(alloc: sphtud.alloc.LinearAllocator, interface_path: []const u8, p: anytype) !void {
     const cp = alloc.checkpoint();
     defer alloc.restore(cp);
 
-    const interface_f = try openRelativeFile(base_path, interface_path);
+    const interface_f = try std.fs.cwd().openFile(interface_path, .{});
     defer interface_f.close();
 
     var reader_buf: [4096]u8 = undefined;
@@ -443,6 +439,7 @@ pub fn main() !void {
 
     const service_def_path = args.next() orelse return error.NoServiceDef;
     const output_path = args.next() orelse return error.NoOutPath;
+    const deps_path = args.next() orelse return error.NoDeps;
 
     const service_def_file = try std.fs.cwd().openFile(service_def_path, .{});
     defer service_def_file.close();
@@ -454,6 +451,12 @@ pub fn main() !void {
     var output_file = try std.fs.cwd().createFile(output_path, .{});
     var output_buf: [4096]u8 = undefined;
     var output_writer = output_file.writer(&output_buf);
+
+    var deps_file = try std.fs.cwd().createFile(deps_path, .{});
+    var deps_buf: [4096]u8 = undefined;
+    var deps_writer = deps_file.writer(&deps_buf);
+
+    try deps_writer.interface.print("{s}: ", .{output_path});
 
     const w = &output_writer.interface;
 
@@ -473,7 +476,11 @@ pub fn main() !void {
             const fp = p.indent();
             try zw.openTaggedUnionField(fp, object_path.?);
 
-            try genInterfaces(alloc.linear(), base_path, interface.?, fp.indent());
+            var full_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const full_interface_path = try resolveFullPath(base_path, interface.?, &full_path_buf);
+            try deps_writer.interface.print("{s} ", .{full_interface_path});
+
+            try genInterfaces(alloc.linear(), full_interface_path, fp.indent());
 
             try zw.closeUnionField(fp);
         },
@@ -483,4 +490,5 @@ pub fn main() !void {
     try zw.closeUnion(&p);
 
     try output_writer.interface.flush();
+    try deps_writer.interface.flush();
 }

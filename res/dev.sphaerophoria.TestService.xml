@@ -9,5 +9,8 @@
       <arg direction="in" type="s" name="Name" />
       <arg direction="out" type="s" name="value" />
     </method>
+    <method name="CallMe" >
+      <arg direction="out" type="s" name="value" />
+    </method>
   </interface>
 </node>

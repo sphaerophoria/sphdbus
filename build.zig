@@ -4,15 +4,20 @@ pub fn genService(b: *std.Build, me: *std.Build.Dependency, path: std.Build.Lazy
     const gen_service = me.artifact("generate_service");
     const sphdbus_mod = me.module("sphdbus");
 
-    const run_gen_service = b.addRunArtifact(gen_service);
-    run_gen_service.addFileArg(path);
-    const test_service_path = run_gen_service.addOutputFileArg("test_service.zig");
+    return runGenService(b, gen_service, sphdbus_mod, path);
+}
 
-    const test_service_mod = b.createModule(.{
+fn runGenService(b: *std.Build, exe: *std.Build.Step.Compile, sphdbus: *std.Build.Module, path: std.Build.LazyPath) *std.Build.Module {
+    const run_gen_service = b.addRunArtifact(exe);
+    run_gen_service.addFileArg(path);
+    const test_service_path = run_gen_service.addOutputFileArg("service.zig");
+    _ = run_gen_service.addDepFileOutputArg("deps");
+
+    const service_mod = b.createModule(.{
         .root_source_file = test_service_path,
     });
-    test_service_mod.addImport("sphdbus", sphdbus_mod);
-    return test_service_mod;
+    service_mod.addImport("sphdbus", sphdbus);
+    return service_mod;
 }
 
 pub const ClientGenerator = struct {
@@ -78,13 +83,7 @@ pub fn build(b: *std.Build) !void {
     });
     generate_service.root_module.addImport("sphtud", sphtud);
 
-    const run_generate_mpris_service = b.addRunArtifact(generate_service);
-    run_generate_mpris_service.addFileArg(b.path("res/mpris_serivce.xml"));
-    const mpris_service_file = run_generate_mpris_service.addOutputFileArg("mpris.zig");
-
-    const mpris_service_mod = b.createModule(.{
-        .root_source_file = mpris_service_file,
-    });
+    const mpris_service_mod = runGenService(b, generate_service, dbus_mod, b.path("res/mpris_serivce.xml"));
     mpris_service_mod.addImport("sphdbus", dbus_mod);
 
     const example = b.addExecutable(.{
@@ -109,6 +108,7 @@ pub fn build(b: *std.Build) !void {
     });
     service_example.root_module.addImport("sphtud", sphtud);
     service_example.root_module.addImport("sphdbus", dbus_mod);
+    service_example.root_module.addImport("test_service", runGenService(b, generate_service, dbus_mod, b.path("res/test_service.xml")));
 
     const dbus_tests = b.addTest(.{
         .name = "dbus_tests",

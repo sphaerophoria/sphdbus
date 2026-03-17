@@ -205,6 +205,10 @@ const DbusMessageReader = struct {
         self.reader.toss(amount);
     }
 
+    fn discard(self: *DbusMessageReader, amount: u32) !void {
+        try self.reader.discardAll(amount);
+    }
+
     fn readByte(self: *DbusMessageReader) !u8 {
         return try self.reader.takeByte();
     }
@@ -313,7 +317,7 @@ const DbusMessageReader = struct {
                     };
 
                     try self.alignForwards(token_alignment);
-                    self.toss(len_bytes);
+                    try self.discard(len_bytes);
                 },
                 .kv_start, .struct_start => {
                     try self.alignForwards(8);
@@ -1002,6 +1006,29 @@ test "array back and forth" {
     try std.testing.expectEqual(null, try it.next(.{}));
 }
 
+test "invalid array len crash" {
+    const to_serialize: []const u32 = &.{
+        1, 2, 3, 4, 5,
+    };
+
+    var msg: [4096]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&msg);
+
+    try dbusSerialize(&writer, to_serialize);
+
+    // 5 elems, 4 bytes per elem, first 4 bytes is size
+    std.debug.assert(std.mem.eql(u8, msg[0..4], &.{ 20, 0, 0, 0 }));
+
+    // Lie about the size to make sure that we can process invalid data
+    msg[0] = 25;
+
+    var reader = std.Io.Reader.fixed(msg[0..writer.end]);
+    var dr = DbusMessageReader{
+        .reader = &reader,
+    };
+    try std.testing.expectError(error.EndOfStream, dbusParseBodyInner(ParseArray(u32), .little, &dr, null));
+}
+
 fn dbusSerialize(io_writer: *std.Io.Writer, val: anytype) !void {
     var dbus_writer = DbusMessageWriter{
         .pos = 0,
@@ -1069,7 +1096,7 @@ pub fn dbusParseBodyInner(comptime T: type, endianness: DbusEndianness, dr: *Dbu
                 try dr.alignForwards(getDbusAlignment(T.T));
 
                 const start = dr.reader.seek;
-                dr.toss(array_len_bytes);
+                try dr.discard(array_len_bytes);
 
                 // Align forwards to inner Type alignment
                 // consume array_len_bytes

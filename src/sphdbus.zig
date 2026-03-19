@@ -152,8 +152,12 @@ const DbusMessageWriter = struct {
     }
 
     fn writeI64(self: *DbusMessageWriter, val: i64) !void {
+        return self.writeU64(@bitCast(val));
+    }
+
+    fn writeU64(self: *DbusMessageWriter, val: u64) !void {
         try self.alignForwards(8);
-        try self.writer.writeInt(i64, val, builtin.cpu.arch.endian());
+        try self.writer.writeInt(u64, val, builtin.cpu.arch.endian());
         self.pos += 8;
     }
 
@@ -916,6 +920,10 @@ fn dbusSerializeInner(dbus_writer: *DbusMessageWriter, val: anytype) !void {
         },
         u32 => {
             try dbus_writer.writeU32(val);
+            return;
+        },
+        u64 => {
+            try dbus_writer.writeU64(val);
             return;
         },
         f64 => {

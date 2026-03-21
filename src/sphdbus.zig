@@ -731,6 +731,42 @@ pub const DbusHeader = struct {
         };
     }
 
+    pub fn signal(serial: u32, path: []const u8, interface: []const u8, member: []const u8, body: ?DbusString, field_buf: []HeaderField) !DbusHeader {
+        var header_fields = std.ArrayList(HeaderField).initBuffer(field_buf);
+
+        try header_fields.appendSliceBounded(&.{
+            .{
+                .path = .{ .inner = path },
+            },
+            .{
+                .interface = .{ .inner = interface },
+            },
+            .{
+                .member = .{ .inner = member },
+            },
+        });
+
+        var discarding_writer = std.Io.Writer.Discarding.init(&.{});
+
+        if (body) |s| {
+            try header_fields.appendBounded(.{
+                .signature = .{ .inner = "s" },
+            });
+
+            try dbusSerialize(&discarding_writer.writer, s);
+        }
+
+        return DbusHeader{
+            .endianness = .little,
+            .message_type = .signal,
+            .flags = 0,
+            .major_version = .@"1",
+            .body_len = @intCast(discarding_writer.fullCount()),
+            .serial = serial,
+            .header_fields = header_fields.items,
+        };
+    }
+
     fn serialize(self: DbusHeader, io_writer: *std.Io.Writer, body: anytype) SerializeError!void {
         // We don't handle this below I don't think
         std.debug.assert(self.endianness == .little);
@@ -1093,6 +1129,7 @@ pub fn dbusParseBodyInner(comptime T: type, endianness: DbusEndianness, dr: *Dbu
         .@"struct" => |si| {
             if (@hasDecl(T, "ParseArrayMarker")) {
                 const array_len_bytes = try dr.readU32(endianness);
+                std.debug.print("Array is {d} long\n", .{array_len_bytes});
                 try dr.alignForwards(getDbusAlignment(T.T));
 
                 const start = dr.reader.seek;
@@ -1326,6 +1363,31 @@ pub const DbusConnection = struct {
             reply_serial,
             destination,
             err_name,
+            body,
+            &field_buf,
+        );
+        // We shouldn't have an outstanding request from 2^32 requests ago
+        self.serial +%= 1;
+
+        if (body) |b| {
+            try to_send.serialize(self.writer, b);
+        } else {
+            try to_send.serialize(self.writer, .{});
+        }
+
+        try self.writer.flush();
+    }
+
+    // FIXME: Duplication between ret/err/call
+    pub fn signal(self: *DbusConnection, path: []const u8, interface: []const u8, member: []const u8, body: ?DbusString) !void {
+        if (self.state != .ready) return error.Uninitialized;
+
+        var field_buf: [6]HeaderField = undefined;
+        const to_send = try DbusHeader.signal(
+            self.serial,
+            path,
+            interface,
+            member,
             body,
             &field_buf,
         );

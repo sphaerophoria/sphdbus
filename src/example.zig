@@ -47,41 +47,43 @@ const DbusHandler = struct {
             switch (self.state) {
                 .wait_initialize => {
                     if (res == .initialized) {
-                        self.state = .{ .wait_volume = try player.getMetadata() };
+                        self.state = .{ .wait_volume = try player.getVolume() };
                     }
                 },
                 .wait_volume => |wait_for| {
                     if (res != .response) continue;
                     if (res.response.handle.inner != wait_for.inner) continue;
 
-                    const parsed = try mpris.OrgMprisMediaPlayer2Player.parseGetMetadataResponse(
+                    const parsed = try mpris.OrgMprisMediaPlayer2Player.parseGetVolumeResponse(
                         res.response.header,
                         options,
                     );
 
-                    var it = parsed.iter();
-                    while (try it.next(options)) |kv| {
+                    std.debug.print("volume: {d}\n", .{parsed});
 
-                        // FIXME: Probably should be part of lib?
-                        const KnownSigantures = enum {
-                            s,
-                            t,
-                            d,
-                            i,
-                        };
+                    //var it = parsed.iter();
+                    //while (try it.next(options)) |kv| {
 
-                        const parsed_sig = std.meta.stringToEnum(KnownSigantures, kv.val.signature()) orelse {
-                            std.debug.print("(cannot print {s})\n", .{kv.val.signature()});
-                            continue;
-                        };
+                    //    // FIXME: Probably should be part of lib?
+                    //    const KnownSigantures = enum {
+                    //        s,
+                    //        t,
+                    //        d,
+                    //        i,
+                    //    };
 
-                        switch (parsed_sig) {
-                            .s => std.debug.print("{s}\n", .{(try kv.val.toConcrete(dbus.DbusString, res.response.header.endianness, options)).inner}),
-                            .t => std.debug.print("{d}\n", .{(try kv.val.toConcrete(u64, res.response.header.endianness, options))}),
-                            .d => std.debug.print("{d}\n", .{(try kv.val.toConcrete(f64, res.response.header.endianness, options))}),
-                            .i => std.debug.print("{d}\n", .{(try kv.val.toConcrete(i32, res.response.header.endianness, options))}),
-                        }
-                    }
+                    //    const parsed_sig = std.meta.stringToEnum(KnownSigantures, kv.val.signature()) orelse {
+                    //        std.debug.print("(cannot print {s})\n", .{kv.val.signature()});
+                    //        continue;
+                    //    };
+
+                    //    switch (parsed_sig) {
+                    //        .s => std.debug.print("{s}\n", .{(try kv.val.toConcrete(dbus.DbusString, res.response.header.endianness, options)).inner}),
+                    //        .t => std.debug.print("{d}\n", .{(try kv.val.toConcrete(u64, res.response.header.endianness, options))}),
+                    //        .d => std.debug.print("{d}\n", .{(try kv.val.toConcrete(f64, res.response.header.endianness, options))}),
+                    //        .i => std.debug.print("{d}\n", .{(try kv.val.toConcrete(i32, res.response.header.endianness, options))}),
+                    //    }
+                    //}
 
                     return;
                 },

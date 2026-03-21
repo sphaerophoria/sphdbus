@@ -120,36 +120,99 @@ pub fn main() !void {
 
     try waitForResponse(&connection, handle, parse_options);
 
+    try sphtud.event.setNonblock(stream.handle);
+
+    var loop = try sphtud.event.Loop2.init();
+    try loop.register(.{
+        .handle = stream.handle,
+        .id = 1,
+        .read = true,
+        .write = false,
+    });
+
+    const timer = try std.posix.timerfd_create(.MONOTONIC, .{});
+    const interval = std.posix.system.itimerspec{
+        .it_value = .{
+            .nsec = 0,
+            .sec = 1,
+        },
+        .it_interval = .{
+            .nsec = 0,
+            .sec = 1,
+        },
+    };
+    try sphtud.event.setNonblock(timer);
+
+    try std.posix.timerfd_settime(timer, .{
+        .ABSTIME = false,
+        .CANCEL_ON_SET = false
+    }, &interval, null);
+
+    try loop.register(.{
+        .handle = timer,
+        .id = 2,
+        .read = true,
+        .write = false,
+    });
+
     const cp = buf_alloc.checkpoint();
     while (true) {
         buf_alloc.restore(cp);
         diagnostics.reset();
 
-        const res = connection.poll(parse_options) catch |e| switch (e) {
-            error.Unrecoverable => {
-                std.log.err("Unrecoverable error, shutting down", .{});
-                try dumpDiagnostics(diagnostics);
-                break;
-            },
-            error.ParseError => {
-                try dumpDiagnostics(diagnostics);
-                break;
-            },
-            error.EndOfStream, error.WriteFailed, error.ReadFailed => {
-                std.log.info("IO failure, shutting down", .{});
-                break;
-            },
-        };
+        const loop_res = try loop.poll(-1) orelse continue;
 
-        const params = switch (res) {
-            .call => |params| params,
-            else => continue,
-        };
+        switch (loop_res) {
+            // dbus notification
+            1 => {
+                const res = connection.poll(parse_options) catch |e| switch (e) {
+                    error.Unrecoverable => {
+                        std.log.err("Unrecoverable error, shutting down", .{});
+                        try dumpDiagnostics(diagnostics);
+                        break;
+                    },
+                    error.ParseError => {
+                        try dumpDiagnostics(diagnostics);
+                        break;
+                    },
+                    error.EndOfStream, error.WriteFailed => {
+                        std.log.info("IO failure, shutting down", .{});
+                        break;
+                    },
+                    error.ReadFailed => {
+                        const source_err = reader.getError() orelse return e;
+                        if (source_err == error.WouldBlock) {
+                            continue;
+                        }
+                        return e;
+                    },
+                };
 
-        switch (try writeResponse(buf_alloc.backAllocator(), params, &connection)) {
-            .shutdown => break,
-            .none => {},
+                const params = switch (res) {
+                    .call => |params| params,
+                    else => continue,
+                };
+
+                switch (try writeResponse(buf_alloc.backAllocator(), params, &connection)) {
+                    .shutdown => break,
+                    .none => {},
+                }
+            },
+            2 => {
+                var buf: [8]u8 = undefined;
+                _ = try std.posix.read(timer, &buf);
+
+                try connection.signal(
+                    "/dev/sphaerophoria/TestService",
+                    "dev.sphaerophoria.TestService",
+                    "Update",
+                    dbus.DbusString { .inner = "hi" },
+                );
+            },
+            else => {},
         }
+
+
     }
 
     std.debug.print("done\n", .{});

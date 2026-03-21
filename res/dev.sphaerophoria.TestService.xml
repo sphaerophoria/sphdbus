@@ -12,5 +12,8 @@
     <method name="CallMe" >
       <arg direction="out" type="s" name="value" />
     </method>
+    <signal>
+      <arg name="message" type="s" />
+    </signal>
   </interface>
 </node>

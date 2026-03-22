@@ -55,15 +55,9 @@ const DbusHandler = struct {
                         try body.addString("org.mpris.MediaPlayer2.Player");
                         try body.addString("Volume");
 
-                        std.debug.print("Serialized info: len: {d}, sig: {s}\n", .{body.writer.buffered().len, body.type_string.items});
+                        std.debug.print("Serialized info: len: {d}, sig: {s}\n", .{ body.writer.buffered().len, body.type_string.items });
 
-                        self.state = .{ .wait_volume = try self.connection.call2(
-                            "/org/mpris/MediaPlayer2",
-                            "org.mpris.MediaPlayer2.spotify",
-                            "org.freedesktop.DBus.Properties",
-                            "Get",
-                            body
-                        ) };
+                        self.state = .{ .wait_volume = try self.connection.call2("/org/mpris/MediaPlayer2", "org.mpris.MediaPlayer2.spotify", "org.freedesktop.DBus.Properties", "Get", body) };
                     }
                 },
                 .wait_volume => |wait_for| {

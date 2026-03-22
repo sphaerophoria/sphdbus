@@ -119,7 +119,6 @@ fn writeResponse(scratch: std.mem.Allocator, message: dbus.ParsedMessage, connec
                                 try body.addString("hello");
                                 try body.addI64(@intCast(j * 100 + i));
                                 try body.endStruct();
-
                             }
 
                             try body.endArray();
@@ -152,7 +151,6 @@ fn writeResponse(scratch: std.mem.Allocator, message: dbus.ParsedMessage, connec
                             s: dbus.DbusString,
                             x: i64,
                         };
-
 
                         var old_data: [100]PreviousStruct = undefined;
                         for (&old_data, 0..) |*v, i| {
@@ -258,10 +256,7 @@ pub fn main() !void {
     };
     try sphtud.event.setNonblock(timer);
 
-    try std.posix.timerfd_settime(timer, .{
-        .ABSTIME = false,
-        .CANCEL_ON_SET = false
-    }, &interval, null);
+    try std.posix.timerfd_settime(timer, .{ .ABSTIME = false, .CANCEL_ON_SET = false }, &interval, null);
 
     try loop.register(.{
         .handle = timer,
@@ -321,13 +316,11 @@ pub fn main() !void {
                     "/dev/sphaerophoria/TestService",
                     "dev.sphaerophoria.TestService",
                     "Update",
-                    dbus.DbusString { .inner = "hi" },
+                    dbus.DbusString{ .inner = "hi" },
                 );
             },
             else => {},
         }
-
-
     }
 
     std.debug.print("done\n", .{});

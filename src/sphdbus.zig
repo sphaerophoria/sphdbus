@@ -132,6 +132,95 @@ const HeaderFieldTag = enum(u8) {
     signature = 8,
 };
 
+const DbusType = enum {
+    byte,
+    bool,
+    variant,
+    u32,
+    u64,
+    i32,
+    i64,
+    f64,
+    array,
+    string,
+    object,
+    map,
+    signature,
+    @"struct",
+
+    fn alignment(t: DbusType) u8 {
+        return switch (t) {
+            .signature, .variant, .byte => 1,
+            .bool, .i32, .u32, .array, .string, .object => 4,
+            .f64, .map, .i64, .u64, .@"struct" => 8,
+        };
+    }
+
+    fn typeString(t: DbusType) u8 {
+        return switch (t) {
+            .byte => 'y',
+            .bool => 'b',
+            .variant => 'v',
+            .u32 => 'u',
+            .u64 => 't',
+            .i32 => 'i',
+            .i64 => 'x',
+            .f64 => 'd',
+            .array => 'a',
+            .string => 's',
+            .object => 'o',
+            .map => '{',
+            .signature => 'g',
+            .@"struct" => '(',
+        };
+    }
+
+    // FIXME: Remove
+    fn fromType(comptime T: type) DbusType {
+        switch (T) {
+            u32 => return .u32,
+            i32 => return .i32,
+            DbusObject => return .object,
+            DbusString => return .string,
+            ParseVariant => return .variant,
+            u64 => return .u64,
+            f64 => return .f64,
+            i64 => return .i64,
+            else => {},
+        }
+
+        switch (@typeInfo(T)) {
+            .@"struct" => {
+                if (@hasDecl(T, "ParseArrayMarker")) return .array;
+                return .@"struct";
+            },
+            else => {},
+        }
+
+        @compileError("Unknown alignment for " ++ @typeName(T));
+    }
+
+    fn fromToken(token: SignatureTokenizer.Token) !DbusType {
+        return switch (token) {
+            .array_start => .array,
+            .struct_start => .@"struct",
+            .struct_end => return error.InvalidToken,
+            .kv_start => .map,
+            .kv_end => return error.InvalidToken,
+            .u32 => .u32,
+            .u64 => .u64,
+            .i32 => .i32,
+            .i64 => .i64,
+            .f64 => .f64,
+            .object => .object,
+            .string => .string,
+            .bool => .bool,
+            .variant => .variant,
+            .signature => .signature,
+        };
+    }
+};
+
 const DbusMessageWriter = struct {
     pos: u32,
     writer: *std.Io.Writer,
@@ -142,7 +231,7 @@ const DbusMessageWriter = struct {
     }
 
     fn writeU32(self: *DbusMessageWriter, val: u32) !void {
-        try self.alignForwards(4);
+        try self.alignForwards(.u32);
         try self.writer.writeInt(u32, val, builtin.cpu.arch.endian());
         self.pos += 4;
     }
@@ -152,7 +241,7 @@ const DbusMessageWriter = struct {
     }
 
     fn writeI64(self: *DbusMessageWriter, val: i64) !void {
-        try self.alignForwards(8);
+        try self.alignForwards(.i64);
         try self.writer.writeInt(i64, val, builtin.cpu.arch.endian());
         self.pos += 8;
     }
@@ -191,7 +280,8 @@ const DbusMessageWriter = struct {
         self.pos += 1;
     }
 
-    fn alignForwards(self: *DbusMessageWriter, alignment: u32) !void {
+    pub fn alignForwards(self: *DbusMessageWriter, t: DbusType) !void {
+        const alignment = t.alignment();
         const new_pos = std.mem.alignForward(u32, self.pos, alignment);
         try self.writer.splatByteAll(0, new_pos - self.pos);
         self.pos = new_pos;
@@ -218,7 +308,7 @@ const DbusMessageReader = struct {
     }
 
     fn readU32(self: *DbusMessageReader, endianness: DbusEndianness) !u32 {
-        try self.alignForwards(4);
+        try self.alignForwards(.u32);
         return try self.reader.takeInt(u32, endianness.toBuiltin());
     }
 
@@ -227,7 +317,7 @@ const DbusMessageReader = struct {
     }
 
     fn readU64(self: *DbusMessageReader, endianness: DbusEndianness) !u64 {
-        try self.alignForwards(8);
+        try self.alignForwards(.u64);
         return try self.reader.takeInt(u64, endianness.toBuiltin());
     }
 
@@ -239,7 +329,8 @@ const DbusMessageReader = struct {
         return @bitCast(try self.readU64(endianness));
     }
 
-    fn alignForwards(self: *DbusMessageReader, alignment: u32) !void {
+    fn alignForwards(self: *DbusMessageReader, t: DbusType) !void {
+        const alignment = t.alignment();
         const new_pos = std.mem.alignForward(usize, self.reader.seek, alignment);
         try self.reader.discardAll(new_pos - self.reader.seek);
     }
@@ -306,7 +397,7 @@ const DbusMessageReader = struct {
                         );
                     };
 
-                    const token_alignment = tokenAlignment(next_token) catch {
+                    const t = DbusType.fromToken(next_token) catch {
                         return makeDbusParseError(
                             diagnostics,
                             signature_it.reader,
@@ -316,11 +407,11 @@ const DbusMessageReader = struct {
                         );
                     };
 
-                    try self.alignForwards(token_alignment);
+                    try self.alignForwards(t);
                     try self.discard(len_bytes);
                 },
                 .kv_start, .struct_start => {
-                    try self.alignForwards(8);
+                    try self.alignForwards(.@"struct");
                 },
                 .bool, .u32, .i32 => {
                     _ = try self.readU32(endianness);
@@ -509,7 +600,8 @@ const HeaderIt = struct {
             .reader = &self.fixed_reader,
         };
 
-        try dbus_reader.alignForwards(8);
+        // FIXME: Probably wrong api
+        try dbus_reader.alignForwards(.@"struct");
         const header_field_byte = try dbus_reader.readByte();
         const header_field = std.meta.intToEnum(HeaderFieldTag, header_field_byte) catch {
             return makeDbusParseError(
@@ -584,7 +676,8 @@ pub const ParsedMessage = struct {
 
         const header_field_len = try dbus_reader.readU32(endianness);
 
-        try dbus_reader.alignForwards(8);
+        // FIXME: Maybe wrong API
+        try dbus_reader.alignForwards(.@"struct");
 
         const header_buf = try dbus_reader.readBytes(header_field_len);
         var header_it = HeaderIt{
@@ -599,7 +692,8 @@ pub const ParsedMessage = struct {
             },
         };
 
-        try dbus_reader.alignForwards(8);
+        // FIXME: Maybe wrong API
+        try dbus_reader.alignForwards(.@"struct");
         const body = try dbus_reader.readBytes(body_len);
 
         return .{
@@ -854,7 +948,7 @@ pub const DbusHeader = struct {
         };
 
         for (self.header_fields) |header_field| {
-            try header_field_writer.alignForwards(8); // struct alignment
+            try header_field_writer.alignForwards(.@"struct");
             try header_field_writer.writeByte(@intFromEnum(header_field));
             switch (header_field) {
                 inline else => |v| try header_field_writer.writeVariant(v),
@@ -864,7 +958,8 @@ pub const DbusHeader = struct {
         try w.writeU32(header_field_writer.pos - w.pos - 4); // num headers
         try w.writeAll(header_field_writer.writer.buffered());
 
-        try w.alignForwards(8); // body alignment
+        // FIXME: probably wrong API
+        try w.alignForwards(.@"struct"); // body alignment
         try dbusSerialize(w.writer, body);
     }
 
@@ -893,7 +988,7 @@ pub const DbusHeader = struct {
         };
 
         for (self.header_fields) |header_field| {
-            try header_field_writer.alignForwards(8); // struct alignment
+            try header_field_writer.alignForwards(.@"struct");
             try header_field_writer.writeByte(@intFromEnum(header_field));
             switch (header_field) {
                 inline else => |v| try header_field_writer.writeVariant(v),
@@ -903,7 +998,8 @@ pub const DbusHeader = struct {
         try w.writeU32(header_field_writer.pos - w.pos - 4); // num headers
         try w.writeAll(header_field_writer.writer.buffered());
 
-        try w.alignForwards(8); // body alignment
+        // FIXME: Probably wrong API
+        try w.alignForwards(.@"struct"); // body alignment
 
         try io_writer.writeAll(body.writer.buffered());
     }
@@ -1099,7 +1195,7 @@ fn dbusSerializeInner(dbus_writer: *DbusMessageWriter, val: anytype) !void {
             if (@hasDecl(@TypeOf(val), "DbusVariantMarker")) {
                 try dbus_writer.writeVariant(val.inner);
             } else {
-                try dbus_writer.alignForwards(8);
+                try dbus_writer.alignForwards(.@"struct");
                 inline for (si.fields) |field| {
                     try dbusSerializeInner(dbus_writer, @field(val, field.name));
                 }
@@ -1236,7 +1332,7 @@ pub fn dbusParseBodyInner(comptime T: type, endianness: DbusEndianness, dr: *Dbu
             if (@hasDecl(T, "ParseArrayMarker")) {
                 const array_len_bytes = try dr.readU32(endianness);
                 std.debug.print("Array is {d} long\n", .{array_len_bytes});
-                try dr.alignForwards(getDbusAlignment(T.T));
+                try dr.alignForwards(DbusType.fromType(T));
 
                 const start = dr.reader.seek;
                 try dr.discard(array_len_bytes);
@@ -1251,7 +1347,7 @@ pub fn dbusParseBodyInner(comptime T: type, endianness: DbusEndianness, dr: *Dbu
                 };
             }
             var ret: T = undefined;
-            try dr.alignForwards(8);
+            try dr.alignForwards(.@"struct");
             inline for (si.fields) |field| {
                 @field(ret, field.name) = try dbusParseBodyInner(field.type, endianness, dr, diagnostics);
             }
@@ -1404,15 +1500,13 @@ pub const BodySerializer = struct {
     type_string: std.ArrayList(u8),
 
     arr_stack_buf: [256]ArrStackItem,
-    // type string starts
     arr_stack: std.ArrayList(ArrStackItem),
     type_string_compare_cursor: usize,
-
 
     const ArrStackItem = struct {
         size: *[4]u8,
         type_start: usize,
-        data_start: usize,
+        data_start: ?usize,
         // FIXME: Rename state
         tag_state: enum {
             initializing,
@@ -1434,40 +1528,49 @@ pub const BodySerializer = struct {
     }
 
     pub fn addString(self: *BodySerializer, s: []const u8) !void {
-        try self.addTypeString('s');
+        try self.commonStart(.string);
         try self.body.writeStringLike(s);
     }
 
     pub fn addI64(self: *BodySerializer, val: i64) !void {
-        try self.addTypeString('x');
+        try self.commonStart(.i64);
         try self.body.writeI64(val);
-        try self.healArrayAlignment8();
     }
 
     pub fn addDouble(self: *BodySerializer, val: f64) !void {
-        try self.addTypeString('d');
+        try self.commonStart(.f64);
         try self.body.writeF64(val);
-        try self.healArrayAlignment8();
     }
 
     pub fn addByte(self: *BodySerializer, val: u8) !void {
-        try self.addTypeString('y');
+        try self.commonStart(.byte);
         try self.body.writeByte(val);
     }
 
     pub fn addU32(self: *BodySerializer, val: u32) !void {
-        try self.addTypeString('u');
+        try self.commonStart(.u32);
         try self.body.writeU32(val);
     }
 
     pub fn startStruct(self: *BodySerializer) !void {
-        try self.addTypeString('(');
-        try self.body.alignForwards(8);
-        try self.healArrayAlignment8();
+        try self.commonStart(.@"struct");
     }
 
     pub fn endStruct(self: *BodySerializer) !void {
         try self.addTypeString(')');
+    }
+
+    fn commonStart(self: *BodySerializer, t: DbusType) !void {
+        try self.addTypeString(t.typeString());
+        // Force alignment in case we are in an array so that length
+        // calculation is correct
+        try self.body.alignForwards(t);
+
+        if (self.getArrStackEnd()) |a| {
+            if (a.data_start == null) {
+                a.data_start = self.writer.end;
+            }
+        }
     }
 
     pub const ArrayTag = struct {
@@ -1480,14 +1583,14 @@ pub const BodySerializer = struct {
 
         // FIXME: Ew
         const current_buffered = self.writer.buffered();
-        const size_ptr: *[4]u8 = current_buffered[current_buffered.len - 4..][0..4];
+        const size_ptr: *[4]u8 = current_buffered[current_buffered.len - 4 ..][0..4];
 
         if (self.arr_stack.getLastOrNull()) |data| {
             if (data.tag_state == .comparing) {
                 self.type_string_compare_cursor = data.type_start;
                 try self.arr_stack.appendBounded(.{
                     .size = size_ptr,
-                    .data_start = self.writer.end,
+                    .data_start = null,
                     .type_start = self.type_string_compare_cursor + 1,
                     .tag_state = .comparing,
                 });
@@ -1497,7 +1600,7 @@ pub const BodySerializer = struct {
 
         try self.arr_stack.appendBounded(.{
             .size = size_ptr,
-            .data_start = self.writer.end,
+            .data_start = null,
             .type_start = self.type_string.items.len,
             .tag_state = .initializing,
         });
@@ -1505,7 +1608,7 @@ pub const BodySerializer = struct {
 
     pub fn endArray(self: *BodySerializer) !void {
         const data = self.arr_stack.pop() orelse return error.NoArray;
-        const size_u32 = std.math.cast(u32, self.writer.end - data.data_start) orelse return error.ArrayTooLong;
+        const size_u32 = std.math.cast(u32, self.writer.end - data.data_start.?) orelse return error.ArrayTooLong;
         @memcpy(data.size, std.mem.asBytes(&size_u32));
     }
 
@@ -1528,17 +1631,6 @@ pub const BodySerializer = struct {
         return &self.arr_stack.items[self.arr_stack.items.len - 1];
     }
 
-    fn healArrayAlignment8(self: *BodySerializer) !void {
-        const data = self.getArrStackEnd() orelse return;
-        switch (data.tag_state) {
-            .writing_first => {},
-            else => return,
-        }
-
-        data.data_start = std.mem.alignForward(usize, data.data_start, 8);
-        data.tag_state = .writing;
-    }
-
     fn addTypeString(self: *BodySerializer, val: u8) !void {
         const data = self.arr_stack.getLastOrNull() orelse {
             // Default case
@@ -1547,17 +1639,16 @@ pub const BodySerializer = struct {
             return;
         };
 
-
         // In array case
         switch (data.tag_state) {
             .initializing => return error.InvalidState,
             .writing_first, .writing => {
-                std.debug.print("writing case, adding {c} ({d})\n", .{val, self.arr_stack.items.len});
+                std.debug.print("writing case, adding {c} ({d})\n", .{ val, self.arr_stack.items.len });
                 try self.type_string.appendBounded(val);
             },
             .comparing => {
                 if (self.type_string_compare_cursor >= self.type_string.items.len) return error.InconsistentTypeString;
-                std.debug.print("Comparing {c} with {c}\n", .{self.type_string.items[self.type_string_compare_cursor], val});
+                std.debug.print("Comparing {c} with {c}\n", .{ self.type_string.items[self.type_string_compare_cursor], val });
                 if (self.type_string.items[self.type_string_compare_cursor] != val) return error.InconsistentTypeString;
                 self.type_string_compare_cursor += 1;
             },
@@ -1633,7 +1724,6 @@ pub const DbusConnection = struct {
 
         return handle;
     }
-
 
     pub fn ret(self: *DbusConnection, reply_serial: u32, destination: []const u8, body: anytype) !void {
         if (self.state != .ready) return error.Uninitialized;
@@ -2043,7 +2133,6 @@ test "generated interface spotify play pause" {
 test {
     std.testing.refAllDeclsRecursive(@This());
 }
-
 
 test "array serialization" {
     var body_buf: [512 * 1024]u8 = undefined;

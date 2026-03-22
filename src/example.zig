@@ -38,16 +38,32 @@ const DbusHandler = struct {
         while (true) {
             const res = try self.connection.poll(options);
 
-            const player = mpris.OrgMprisMediaPlayer2Player{
-                .connection = &self.connection,
-                .service = "org.mpris.MediaPlayer2.spotify",
-                .object_path = "/org/mpris/MediaPlayer2",
-            };
+            //const player = mpris.OrgMprisMediaPlayer2Player{
+            //    .connection = &self.connection,
+            //    .service = "org.mpris.MediaPlayer2.spotify",
+            //    .object_path = "/org/mpris/MediaPlayer2",
+            //};
 
             switch (self.state) {
                 .wait_initialize => {
                     if (res == .initialized) {
-                        self.state = .{ .wait_volume = try player.getVolume() };
+                        var buf: [4096]u8 = undefined;
+
+                        var body: dbus.BodySerializer = undefined;
+                        body.initPinned(&buf);
+
+                        try body.addString("org.mpris.MediaPlayer2.Player");
+                        try body.addString("Volume");
+
+                        std.debug.print("Serialized info: len: {d}, sig: {s}\n", .{body.writer.buffered().len, body.type_string.items});
+
+                        self.state = .{ .wait_volume = try self.connection.call2(
+                            "/org/mpris/MediaPlayer2",
+                            "org.mpris.MediaPlayer2.spotify",
+                            "org.freedesktop.DBus.Properties",
+                            "Get",
+                            body
+                        ) };
                     }
                 },
                 .wait_volume => |wait_for| {

@@ -12,6 +12,18 @@
     <method name="CallMe" >
       <arg direction="out" type="s" name="value" />
     </method>
+    <method name="GetStructure" >
+      <arg direction="out" type="(xdy)" name="value" />
+    </method>
+    <method name="GetUintArray" >
+      <arg direction="out" type="au" name="value" />
+    </method>
+    <method name="GetStructArray" >
+      <arg direction="out" type="a(sx)" name="value" />
+    </method>
+    <method name="GetNestedStructArray" >
+      <arg direction="out" type="aa(sx)" name="value" />
+    </method>
     <signal>
       <arg name="message" type="s" />
     </signal>

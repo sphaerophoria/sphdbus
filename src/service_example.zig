@@ -5,6 +5,13 @@ const dbus = @import("sphdbus");
 const mpris = @import("mpris");
 const service_def = @import("test_service");
 
+fn writeBuffer(data: []const u8, path: []const u8) !void {
+    const f = try std.fs.cwd().createFile(path, .{});
+    defer f.close();
+
+    try f.writeAll(data);
+}
+
 fn waitForResponse(connection: *dbus.DbusConnection, handle: dbus.CallHandle, parse_options: dbus.ParseOptions) !void {
     while (true) {
         const res = try connection.poll(parse_options);
@@ -28,6 +35,9 @@ fn writeResponse(scratch: std.mem.Allocator, message: dbus.ParsedMessage, connec
         error.InvalidRequest => return .none,
     } orelse return .none;
 
+    const body_buf = try scratch.alloc(u8, 512 * 1024);
+    var body: dbus.BodySerializer = undefined;
+    body.initPinned(body_buf);
     switch (request) {
         .@"/dev/sphaerophoria/TestService" => |path_req| switch (path_req) {
             .@"dev.sphaerophoria.TestService" => |interface_req| switch (interface_req) {
@@ -36,28 +46,133 @@ fn writeResponse(scratch: std.mem.Allocator, message: dbus.ParsedMessage, connec
                         var buf: [4096]u8 = undefined;
                         const s = try std.fmt.bufPrint(&buf, "Hello {s}", .{args.Name.inner});
 
+                        try body.addString(s);
+
                         // FIXME: Return types should be typed
-                        try connection.ret(
+                        try connection.ret2(
                             message.serial,
                             message.headers.sender.?.inner,
-                            dbus.DbusString{ .inner = s },
+                            body,
                         );
                     },
                     .Goodbye => |args| {
                         var buf: [4096]u8 = undefined;
                         const s = try std.fmt.bufPrint(&buf, "Goodbye {s}", .{args.Name.inner});
+
+                        try body.addString(s);
                         // FIXME: Return types should be typed
-                        try connection.ret(
+                        try connection.ret2(
                             message.serial,
                             message.headers.sender.?.inner,
-                            dbus.DbusString{ .inner = s },
+                            body,
                         );
                     },
                     .CallMe => |_| {
-                        try connection.ret(
+                        try body.addString("maybe");
+                        try connection.ret2(
                             message.serial,
                             message.headers.sender.?.inner,
-                            dbus.DbusString{ .inner = "maybe" },
+                            body,
+                        );
+                    },
+                    .GetStructure => |_| {
+                        try body.startStruct();
+                        try body.addI64(0xcafef00d);
+                        try body.addDouble(1.234);
+                        try body.addByte('d');
+                        try body.endStruct();
+
+                        try connection.ret2(
+                            message.serial,
+                            message.headers.sender.?.inner,
+                            body,
+                        );
+                    },
+                    .GetUintArray => |_| {
+                        try body.startArray();
+
+                        for (0..100) |i| {
+                            try body.startArrayElem();
+                            try body.addU32(@intCast(i));
+                        }
+
+                        try body.endArray();
+
+                        try connection.ret2(
+                            message.serial,
+                            message.headers.sender.?.inner,
+                            body,
+                        );
+                    },
+                    .GetNestedStructArray => |_| {
+                        try body.startArray();
+
+                        for (0..2) |j| {
+                            try body.startArrayElem();
+
+                            try body.startArray();
+
+                            for (0..100) |i| {
+                                try body.startArrayElem();
+
+                                try body.startStruct();
+                                try body.addString("hello");
+                                try body.addI64(@intCast(j * 100 + i));
+                                try body.endStruct();
+
+                            }
+
+                            try body.endArray();
+                        }
+                        try body.endArray();
+
+                        std.debug.print("{s}\n", .{body.type_string.items});
+                        try connection.ret2(
+                            message.serial,
+                            message.headers.sender.?.inner,
+                            body,
+                        );
+                    },
+                    .GetStructArray => |_| {
+                        try body.startArray();
+
+                        for (0..100) |i| {
+                            try body.startArrayElem();
+
+                            try body.startStruct();
+                            try body.addString("hello");
+                            try body.addI64(@intCast(i));
+                            try body.endStruct();
+                        }
+
+                        try body.endArray();
+                        std.debug.print("{s}\n", .{body.type_string.items});
+
+                        const PreviousStruct = struct {
+                            s: dbus.DbusString,
+                            x: i64,
+                        };
+
+
+                        var old_data: [100]PreviousStruct = undefined;
+                        for (&old_data, 0..) |*v, i| {
+                            v.s = .{ .inner = "hello" };
+                            v.x = @intCast(i);
+                        }
+
+                        var old_version_buf: [512 * 1024]u8 = undefined;
+                        var writer = std.Io.Writer.fixed(&old_version_buf);
+                        try dbus.dbusSerialize(&writer, &old_data);
+
+                        try writeBuffer(writer.buffered(), "old.bin");
+                        try writeBuffer(body.writer.buffered(), "new.bin");
+
+                        std.debug.assert(std.mem.eql(u8, writer.buffered(), body.writer.buffered()));
+
+                        try connection.ret2(
+                            message.serial,
+                            message.headers.sender.?.inner,
+                            body,
                         );
                     },
                 },
@@ -176,8 +291,8 @@ pub fn main() !void {
                         break;
                     },
                     error.EndOfStream, error.WriteFailed => {
-                        std.log.info("IO failure, shutting down", .{});
-                        break;
+                        std.log.info("IO failure, shutting down: {t}", .{e});
+                        return e;
                     },
                     error.ReadFailed => {
                         const source_err = reader.getError() orelse return e;

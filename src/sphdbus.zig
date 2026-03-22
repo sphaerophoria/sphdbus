@@ -663,6 +663,40 @@ pub const DbusHeader = struct {
         };
     }
 
+    pub fn call2(serial: u32, path: []const u8, destination: []const u8, interface: []const u8, member: []const u8, body: BodySerializer, field_buf: []HeaderField) !DbusHeader {
+        var header_fields = std.ArrayList(HeaderField).initBuffer(field_buf);
+        try header_fields.appendSliceBounded(&.{
+            .{
+                .path = .{ .inner = path },
+            },
+            .{
+                .destination = .{ .inner = destination },
+            },
+            .{
+                .interface = .{ .inner = interface },
+            },
+            .{
+                .member = .{ .inner = member },
+            },
+        });
+
+        if (body.type_string.items.len > 0) {
+            try header_fields.appendBounded(.{
+                .signature = .{ .inner = body.type_string.items },
+            });
+        }
+
+        return DbusHeader{
+            .endianness = .little,
+            .message_type = .call,
+            .flags = 0,
+            .major_version = .@"1",
+            .body_len = body.body.pos,
+            .serial = serial,
+            .header_fields = header_fields.items,
+        };
+    }
+
     pub fn ret(serial: u32, reply_serial: u32, destination: []const u8, body: anytype, field_buf: []HeaderField) !DbusHeader {
         var header_fields = std.ArrayList(HeaderField).initBuffer(field_buf);
         try header_fields.appendSliceBounded(&.{
@@ -691,6 +725,34 @@ pub const DbusHeader = struct {
             .flags = 0,
             .major_version = .@"1",
             .body_len = @intCast(discarding_writer.fullCount()),
+            .serial = serial,
+            .header_fields = header_fields.items,
+        };
+    }
+
+    pub fn ret2(serial: u32, reply_serial: u32, destination: []const u8, body: BodySerializer, field_buf: []HeaderField) !DbusHeader {
+        var header_fields = std.ArrayList(HeaderField).initBuffer(field_buf);
+        try header_fields.appendSliceBounded(&.{
+            .{
+                .destination = .{ .inner = destination },
+            },
+            .{
+                .reply_serial = reply_serial,
+            },
+        });
+
+        if (body.type_string.items.len > 0) {
+            try header_fields.appendBounded(.{
+                .signature = .{ .inner = body.type_string.items },
+            });
+        }
+
+        return DbusHeader{
+            .endianness = .little,
+            .message_type = .ret,
+            .flags = 0,
+            .major_version = .@"1",
+            .body_len = @intCast(body.writer.buffered().len),
             .serial = serial,
             .header_fields = header_fields.items,
         };
@@ -804,6 +866,46 @@ pub const DbusHeader = struct {
 
         try w.alignForwards(8); // body alignment
         try dbusSerialize(w.writer, body);
+    }
+
+    fn serialize2(self: DbusHeader, io_writer: *std.Io.Writer, body: BodySerializer) SerializeError!void {
+        // We don't handle this below I don't think
+        std.debug.assert(self.endianness == .little);
+
+        var w = DbusMessageWriter{
+            .pos = 0,
+            .writer = io_writer,
+        };
+
+        try w.writeByte(@intFromEnum(self.endianness));
+        try w.writeByte(@intFromEnum(self.message_type));
+        try w.writeByte(self.flags); // flags
+        try w.writeByte(@intFromEnum(self.major_version));
+
+        try w.writeU32(self.body_len); // len
+        try w.writeU32(self.serial); // serial
+
+        var header_buf: [4096]u8 = undefined;
+        var header_field_io = std.Io.Writer.fixed(&header_buf);
+        var header_field_writer = DbusMessageWriter{
+            .pos = w.pos + 4,
+            .writer = &header_field_io,
+        };
+
+        for (self.header_fields) |header_field| {
+            try header_field_writer.alignForwards(8); // struct alignment
+            try header_field_writer.writeByte(@intFromEnum(header_field));
+            switch (header_field) {
+                inline else => |v| try header_field_writer.writeVariant(v),
+            }
+        }
+
+        try w.writeU32(header_field_writer.pos - w.pos - 4); // num headers
+        try w.writeAll(header_field_writer.writer.buffered());
+
+        try w.alignForwards(8); // body alignment
+
+        try io_writer.writeAll(body.writer.buffered());
     }
 
     pub fn format(self: DbusHeader, w: *std.Io.Writer) !void {
@@ -972,6 +1074,10 @@ fn dbusSerializeInner(dbus_writer: *DbusMessageWriter, val: anytype) !void {
             try dbus_writer.writeU32(val);
             return;
         },
+        u64 => {
+            try dbus_writer.writeI64(@bitCast(val));
+            return;
+        },
         f64 => {
             try dbus_writer.writeF64(val);
             return;
@@ -1065,7 +1171,7 @@ test "invalid array len crash" {
     try std.testing.expectError(error.EndOfStream, dbusParseBodyInner(ParseArray(u32), .little, &dr, null));
 }
 
-fn dbusSerialize(io_writer: *std.Io.Writer, val: anytype) !void {
+pub fn dbusSerialize(io_writer: *std.Io.Writer, val: anytype) !void {
     var dbus_writer = DbusMessageWriter{
         .pos = 0,
         .writer = io_writer,
@@ -1290,6 +1396,175 @@ fn makeDbusParseError(diagnostics: ?*DbusErrorDiagnostics, reader: *std.Io.Reade
 
 pub const CallHandle = struct { inner: u32 };
 
+pub const BodySerializer = struct {
+    writer: std.Io.Writer,
+    body: DbusMessageWriter,
+
+    type_string_buf: [255]u8,
+    type_string: std.ArrayList(u8),
+
+    arr_stack_buf: [256]ArrStackItem,
+    // type string starts
+    arr_stack: std.ArrayList(ArrStackItem),
+    type_string_compare_cursor: usize,
+
+
+    const ArrStackItem = struct {
+        size: *[4]u8,
+        type_start: usize,
+        data_start: usize,
+        // FIXME: Rename state
+        tag_state: enum {
+            initializing,
+            writing_first,
+            writing,
+            comparing,
+        },
+    };
+
+    pub fn initPinned(self: *BodySerializer, buf: []u8) void {
+        self.writer = std.Io.Writer.fixed(buf);
+        self.body = .{
+            .pos = 0,
+            .writer = &self.writer,
+        };
+        self.type_string = .initBuffer(&self.type_string_buf);
+        self.arr_stack = .initBuffer(&self.arr_stack_buf);
+        self.type_string_compare_cursor = 0;
+    }
+
+    pub fn addString(self: *BodySerializer, s: []const u8) !void {
+        try self.addTypeString('s');
+        try self.body.writeStringLike(s);
+    }
+
+    pub fn addI64(self: *BodySerializer, val: i64) !void {
+        try self.addTypeString('x');
+        try self.body.writeI64(val);
+        try self.healArrayAlignment8();
+    }
+
+    pub fn addDouble(self: *BodySerializer, val: f64) !void {
+        try self.addTypeString('d');
+        try self.body.writeF64(val);
+        try self.healArrayAlignment8();
+    }
+
+    pub fn addByte(self: *BodySerializer, val: u8) !void {
+        try self.addTypeString('y');
+        try self.body.writeByte(val);
+    }
+
+    pub fn addU32(self: *BodySerializer, val: u32) !void {
+        try self.addTypeString('u');
+        try self.body.writeU32(val);
+    }
+
+    pub fn startStruct(self: *BodySerializer) !void {
+        try self.addTypeString('(');
+        try self.body.alignForwards(8);
+        try self.healArrayAlignment8();
+    }
+
+    pub fn endStruct(self: *BodySerializer) !void {
+        try self.addTypeString(')');
+    }
+
+    pub const ArrayTag = struct {
+        count_field: *u32,
+    };
+
+    pub fn startArray(self: *BodySerializer) !void {
+        try self.addTypeString('a');
+        try self.body.writeU32(0);
+
+        // FIXME: Ew
+        const current_buffered = self.writer.buffered();
+        const size_ptr: *[4]u8 = current_buffered[current_buffered.len - 4..][0..4];
+
+        if (self.arr_stack.getLastOrNull()) |data| {
+            if (data.tag_state == .comparing) {
+                self.type_string_compare_cursor = data.type_start;
+                try self.arr_stack.appendBounded(.{
+                    .size = size_ptr,
+                    .data_start = self.writer.end,
+                    .type_start = self.type_string_compare_cursor + 1,
+                    .tag_state = .comparing,
+                });
+                return;
+            }
+        }
+
+        try self.arr_stack.appendBounded(.{
+            .size = size_ptr,
+            .data_start = self.writer.end,
+            .type_start = self.type_string.items.len,
+            .tag_state = .initializing,
+        });
+    }
+
+    pub fn endArray(self: *BodySerializer) !void {
+        const data = self.arr_stack.pop() orelse return error.NoArray;
+        const size_u32 = std.math.cast(u32, self.writer.end - data.data_start) orelse return error.ArrayTooLong;
+        @memcpy(data.size, std.mem.asBytes(&size_u32));
+    }
+
+    pub fn startArrayElem(self: *BodySerializer) !void {
+        const data = self.getArrStackEnd() orelse return error.NoArray;
+
+        self.type_string_compare_cursor = data.type_start;
+
+        std.debug.print("New elem for ({d})\n", .{self.arr_stack.items.len});
+
+        switch (data.tag_state) {
+            .initializing => data.tag_state = .writing_first,
+            .writing_first, .writing => data.tag_state = .comparing,
+            .comparing => {},
+        }
+    }
+
+    fn getArrStackEnd(self: *BodySerializer) ?*ArrStackItem {
+        if (self.arr_stack.items.len == 0) return null;
+        return &self.arr_stack.items[self.arr_stack.items.len - 1];
+    }
+
+    fn healArrayAlignment8(self: *BodySerializer) !void {
+        const data = self.getArrStackEnd() orelse return;
+        switch (data.tag_state) {
+            .writing_first => {},
+            else => return,
+        }
+
+        data.data_start = std.mem.alignForward(usize, data.data_start, 8);
+        data.tag_state = .writing;
+    }
+
+    fn addTypeString(self: *BodySerializer, val: u8) !void {
+        const data = self.arr_stack.getLastOrNull() orelse {
+            // Default case
+            std.debug.print("default case, adding {c}\n", .{val});
+            try self.type_string.appendBounded(val);
+            return;
+        };
+
+
+        // In array case
+        switch (data.tag_state) {
+            .initializing => return error.InvalidState,
+            .writing_first, .writing => {
+                std.debug.print("writing case, adding {c} ({d})\n", .{val, self.arr_stack.items.len});
+                try self.type_string.appendBounded(val);
+            },
+            .comparing => {
+                if (self.type_string_compare_cursor >= self.type_string.items.len) return error.InconsistentTypeString;
+                std.debug.print("Comparing {c} with {c}\n", .{self.type_string.items[self.type_string_compare_cursor], val});
+                if (self.type_string.items[self.type_string_compare_cursor] != val) return error.InconsistentTypeString;
+                self.type_string_compare_cursor += 1;
+            },
+        }
+    }
+};
+
 pub const DbusConnection = struct {
     serial: u32,
     reader: *std.Io.Reader,
@@ -1335,6 +1610,31 @@ pub const DbusConnection = struct {
         return handle;
     }
 
+    pub fn call2(self: *Self, path: []const u8, destination: []const u8, interface: []const u8, member: []const u8, body: BodySerializer) !CallHandle {
+        if (self.state != .ready) return error.Uninitialized;
+
+        var field_buf: [6]HeaderField = undefined;
+        const to_send = try DbusHeader.call2(
+            self.serial,
+            path,
+            destination,
+            interface,
+            member,
+            body,
+            &field_buf,
+        );
+
+        const handle = CallHandle{ .inner = self.serial };
+        // We shouldn't have an outstanding request from 2^32 requests ago
+        self.serial +%= 1;
+
+        try to_send.serialize2(self.writer, body);
+        try self.writer.flush();
+
+        return handle;
+    }
+
+
     pub fn ret(self: *DbusConnection, reply_serial: u32, destination: []const u8, body: anytype) !void {
         if (self.state != .ready) return error.Uninitialized;
 
@@ -1350,6 +1650,24 @@ pub const DbusConnection = struct {
         self.serial +%= 1;
 
         try to_send.serialize(self.writer, body);
+        try self.writer.flush();
+    }
+
+    pub fn ret2(self: *DbusConnection, reply_serial: u32, destination: []const u8, body: BodySerializer) !void {
+        if (self.state != .ready) return error.Uninitialized;
+
+        var field_buf: [6]HeaderField = undefined;
+        const to_send = try DbusHeader.ret2(
+            self.serial,
+            reply_serial,
+            destination,
+            body,
+            &field_buf,
+        );
+        // We shouldn't have an outstanding request from 2^32 requests ago
+        self.serial +%= 1;
+
+        try to_send.serialize2(self.writer, body);
         try self.writer.flush();
     }
 
@@ -1724,4 +2042,29 @@ test "generated interface spotify play pause" {
 
 test {
     std.testing.refAllDeclsRecursive(@This());
+}
+
+
+test "array serialization" {
+    var body_buf: [512 * 1024]u8 = undefined;
+    var body: BodySerializer = undefined;
+    body.initPinned(&body_buf);
+
+    try body.startArray();
+
+    for (0..100) |i| {
+        try body.startArrayElem();
+        try body.addU32(@intCast(i));
+    }
+
+    try body.endArray();
+
+    var previous_version: [100]u32 = undefined;
+    for (0..100) |i| {
+        previous_version[i] = @intCast(i);
+    }
+    var old_version_buf: [512 * 1024]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&old_version_buf);
+    try dbusSerialize(&writer, &previous_version);
+    try std.testing.expectEqualSlices(u8, body.writer.buffered(), writer.buffered());
 }

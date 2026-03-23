@@ -1573,7 +1573,8 @@ pub const BodySerializer = struct {
     };
 
     pub fn startArray(self: *BodySerializer) !void {
-        try self.addTypeString('a');
+        try self.commonStart(.array);
+
         try self.body.writeU32(0);
 
         // FIXME: Ew

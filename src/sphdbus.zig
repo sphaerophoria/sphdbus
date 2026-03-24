@@ -1505,7 +1505,6 @@ pub const BodySerializer = struct {
         // FIXME: Rename state
         tag_state: enum {
             initializing,
-            writing_first,
             writing,
             comparing,
         },
@@ -1575,31 +1574,37 @@ pub const BodySerializer = struct {
     pub fn startArray(self: *BodySerializer) !void {
         try self.commonStart(.array);
 
-        try self.body.writeU32(0);
+        const size_ptr = try self.stubArrayLength();
 
-        // FIXME: Ew
-        const current_buffered = self.writer.buffered();
-        const size_ptr: *[4]u8 = current_buffered[current_buffered.len - 4 ..][0..4];
-
-        if (self.arr_stack.getLastOrNull()) |data| {
-            if (data.tag_state == .comparing) {
-                self.type_string_compare_cursor = data.type_start;
-                try self.arr_stack.appendBounded(.{
-                    .size = size_ptr,
-                    .data_start = null,
-                    .type_start = self.type_string_compare_cursor + 1,
-                    .tag_state = .comparing,
-                });
-                return;
-            }
-        }
-
-        try self.arr_stack.appendBounded(.{
+        var new_arr_stack = ArrStackItem {
             .size = size_ptr,
             .data_start = null,
             .type_start = self.type_string.items.len,
             .tag_state = .initializing,
-        });
+        };
+
+        if (self.arr_stack.getLastOrNull()) |data| {
+            if (data.tag_state == .comparing) {
+                // If we are on the second element of an array, we are no
+                // longer filling in the type info. If we have nested arrays we
+                // need to respect that we are in the second iteration of some
+                // array, even if we are in the first iteration of our own.
+                // Here the type start/type_string_compare_cursor are no longer
+                // just at the end, but where we inserted the type data last time
+
+                self.type_string_compare_cursor = data.type_start;
+                new_arr_stack.type_start = self.type_string_compare_cursor + 1;
+                new_arr_stack.tag_state = .comparing;
+            }
+        }
+
+        try self.arr_stack.appendBounded(new_arr_stack);
+    }
+
+    fn stubArrayLength(self: *BodySerializer) !*[4]u8 {
+        try self.body.writeU32(0);
+        const current_buffered = self.writer.buffered();
+        return current_buffered[current_buffered.len - 4 ..][0..4];
     }
 
     pub fn endArray(self: *BodySerializer) !void {
@@ -1616,8 +1621,8 @@ pub const BodySerializer = struct {
         std.debug.print("New elem for ({d})\n", .{self.arr_stack.items.len});
 
         switch (data.tag_state) {
-            .initializing => data.tag_state = .writing_first,
-            .writing_first, .writing => data.tag_state = .comparing,
+            .initializing => data.tag_state = .writing,
+            .writing => data.tag_state = .comparing,
             .comparing => {},
         }
     }
@@ -1638,7 +1643,7 @@ pub const BodySerializer = struct {
         // In array case
         switch (data.tag_state) {
             .initializing => return error.InvalidState,
-            .writing_first, .writing => {
+            .writing => {
                 std.debug.print("writing case, adding {c} ({d})\n", .{ val, self.arr_stack.items.len });
                 try self.type_string.appendBounded(val);
             },

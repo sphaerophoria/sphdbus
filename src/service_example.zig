@@ -52,7 +52,7 @@ fn writeResponse(scratch: std.mem.Allocator, message: dbus.ParsedMessage, connec
                         try connection.ret2(
                             message.serial,
                             message.headers.sender.?.inner,
-                            body,
+                            &body,
                         );
                     },
                     .Goodbye => |args| {
@@ -64,7 +64,7 @@ fn writeResponse(scratch: std.mem.Allocator, message: dbus.ParsedMessage, connec
                         try connection.ret2(
                             message.serial,
                             message.headers.sender.?.inner,
-                            body,
+                            &body,
                         );
                     },
                     .CallMe => |_| {
@@ -72,7 +72,7 @@ fn writeResponse(scratch: std.mem.Allocator, message: dbus.ParsedMessage, connec
                         try connection.ret2(
                             message.serial,
                             message.headers.sender.?.inner,
-                            body,
+                            &body,
                         );
                     },
                     .GetStructure => |_| {
@@ -85,7 +85,7 @@ fn writeResponse(scratch: std.mem.Allocator, message: dbus.ParsedMessage, connec
                         try connection.ret2(
                             message.serial,
                             message.headers.sender.?.inner,
-                            body,
+                            &body,
                         );
                     },
                     .GetUintArray => |_| {
@@ -101,7 +101,7 @@ fn writeResponse(scratch: std.mem.Allocator, message: dbus.ParsedMessage, connec
                         try connection.ret2(
                             message.serial,
                             message.headers.sender.?.inner,
-                            body,
+                            &body,
                         );
                     },
                     .GetNestedStructArray => |_| {
@@ -129,7 +129,7 @@ fn writeResponse(scratch: std.mem.Allocator, message: dbus.ParsedMessage, connec
                         try connection.ret2(
                             message.serial,
                             message.headers.sender.?.inner,
-                            body,
+                            &body,
                         );
                     },
                     .GetStructArray => |_| {
@@ -145,32 +145,11 @@ fn writeResponse(scratch: std.mem.Allocator, message: dbus.ParsedMessage, connec
                         }
 
                         try body.endArray();
-                        std.debug.print("{s}\n", .{body.type_string.items});
-
-                        const PreviousStruct = struct {
-                            s: dbus.DbusString,
-                            x: i64,
-                        };
-
-                        var old_data: [100]PreviousStruct = undefined;
-                        for (&old_data, 0..) |*v, i| {
-                            v.s = .{ .inner = "hello" };
-                            v.x = @intCast(i);
-                        }
-
-                        var old_version_buf: [512 * 1024]u8 = undefined;
-                        var writer = std.Io.Writer.fixed(&old_version_buf);
-                        try dbus.dbusSerialize(&writer, &old_data);
-
-                        try writeBuffer(writer.buffered(), "old.bin");
-                        try writeBuffer(body.writer.buffered(), "new.bin");
-
-                        std.debug.assert(std.mem.eql(u8, writer.buffered(), body.writer.buffered()));
 
                         try connection.ret2(
                             message.serial,
                             message.headers.sender.?.inner,
-                            body,
+                            &body,
                         );
                     },
                 },

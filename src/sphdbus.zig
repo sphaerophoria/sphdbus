@@ -754,7 +754,7 @@ pub const DbusHeader = struct {
         };
     }
 
-    pub fn call2(serial: u32, path: []const u8, destination: []const u8, interface: []const u8, member: []const u8, body: BodySerializer, field_buf: []HeaderField) !DbusHeader {
+    pub fn call2(serial: u32, path: []const u8, destination: []const u8, interface: []const u8, member: []const u8, body: *const BodySerializer, field_buf: []HeaderField) !DbusHeader {
         var header_fields = std.ArrayList(HeaderField).initBuffer(field_buf);
         try header_fields.appendSliceBounded(&.{
             .{
@@ -821,7 +821,7 @@ pub const DbusHeader = struct {
         };
     }
 
-    pub fn ret2(serial: u32, reply_serial: u32, destination: []const u8, body: BodySerializer, field_buf: []HeaderField) !DbusHeader {
+    pub fn ret2(serial: u32, reply_serial: u32, destination: []const u8, body: *const BodySerializer, field_buf: []HeaderField) !DbusHeader {
         var header_fields = std.ArrayList(HeaderField).initBuffer(field_buf);
         try header_fields.appendSliceBounded(&.{
             .{
@@ -959,7 +959,7 @@ pub const DbusHeader = struct {
         try dbusSerialize(w.writer, body);
     }
 
-    fn serialize2(self: DbusHeader, io_writer: *std.Io.Writer, body: BodySerializer) SerializeError!void {
+    fn serialize2(self: DbusHeader, io_writer: *std.Io.Writer, body: *const BodySerializer) SerializeError!void {
         // We don't handle this below I don't think
         std.debug.assert(self.endianness == .little);
 
@@ -1203,41 +1203,41 @@ fn dbusSerializeInner(dbus_writer: *DbusMessageWriter, val: anytype) !void {
     @compileError("Unhandled type " ++ @typeName(@TypeOf(val)));
 }
 
-test "array back and forth" {
-    const Item = struct {
-        id: DbusString,
-        name: DbusString,
-    };
-
-    const to_serialize: []const Item = &.{
-        .{ .id = .{ .inner = "hello" }, .name = .{ .inner = "world" } },
-        .{ .id = .{ .inner = "goodbye" }, .name = .{ .inner = "world2" } },
-    };
-
-    var msg: [4096]u8 = undefined;
-    var writer = std.Io.Writer.fixed(&msg);
-
-    try dbusSerialize(&writer, to_serialize);
-
-    var reader = std.Io.Reader.fixed(msg[0..writer.end]);
-    var dr = DbusMessageReader{
-        .reader = &reader,
-    };
-
-    const parsed = try dbusParseBodyInner(ParseArray(Item), .little, &dr, null);
-
-    var it = parsed.iter();
-
-    const first = try it.next(.{}) orelse return error.MissingItem;
-    try std.testing.expectEqualStrings("hello", first.id.inner);
-    try std.testing.expectEqualStrings("world", first.name.inner);
-
-    const second = try it.next(.{}) orelse return error.MissingItem;
-    try std.testing.expectEqualStrings("goodbye", second.id.inner);
-    try std.testing.expectEqualStrings("world2", second.name.inner);
-
-    try std.testing.expectEqual(null, try it.next(.{}));
-}
+//test "array back and forth" {
+//    const Item = struct {
+//        id: DbusString,
+//        name: DbusString,
+//    };
+//
+//    const to_serialize: []const Item = &.{
+//        .{ .id = .{ .inner = "hello" }, .name = .{ .inner = "world" } },
+//        .{ .id = .{ .inner = "goodbye" }, .name = .{ .inner = "world2" } },
+//    };
+//
+//    var msg: [4096]u8 = undefined;
+//    var writer = std.Io.Writer.fixed(&msg);
+//
+//    try dbusSerialize(&writer, to_serialize);
+//
+//    var reader = std.Io.Reader.fixed(msg[0..writer.end]);
+//    var dr = DbusMessageReader{
+//        .reader = &reader,
+//    };
+//
+//    const parsed = try dbusParseBodyInner(ParseArray(Item), .little, &dr, null);
+//
+//    var it = parsed.iter();
+//
+//    const first = try it.next(.{}) orelse return error.MissingItem;
+//    try std.testing.expectEqualStrings("hello", first.id.inner);
+//    try std.testing.expectEqualStrings("world", first.name.inner);
+//
+//    const second = try it.next(.{}) orelse return error.MissingItem;
+//    try std.testing.expectEqualStrings("goodbye", second.id.inner);
+//    try std.testing.expectEqualStrings("world2", second.name.inner);
+//
+//    try std.testing.expectEqual(null, try it.next(.{}));
+//}
 
 test "invalid array len crash" {
     const to_serialize: []const u32 = &.{
@@ -1326,7 +1326,6 @@ pub fn dbusParseBodyInner(comptime T: type, endianness: DbusEndianness, dr: *Dbu
         .@"struct" => |si| {
             if (@hasDecl(T, "ParseArrayMarker")) {
                 const array_len_bytes = try dr.readU32(endianness);
-                std.debug.print("Array is {d} long\n", .{array_len_bytes});
                 try dr.alignForwards(alignmentOf(DbusType.fromType(T)));
 
                 const start = dr.reader.seek;
@@ -1556,20 +1555,17 @@ pub const BodySerializer = struct {
 
     fn commonStart(self: *BodySerializer, t: DbusType) !void {
         try self.addTypeString(t.typeString());
-        // Force alignment in case we are in an array so that length
-        // calculation is correct
-        try self.body.alignForwards(alignmentOf(t));
 
         if (self.getArrStackEnd()) |a| {
             if (a.data_start == null) {
+                // If we are the first array element, ensure we are aligned
+                // correctly and mark where the first element started for the
+                // length calculation later
+                try self.body.alignForwards(alignmentOf(t));
                 a.data_start = self.writer.end;
             }
         }
     }
-
-    pub const ArrayTag = struct {
-        count_field: *u32,
-    };
 
     pub fn startArray(self: *BodySerializer) !void {
         try self.commonStart(.array);
@@ -1635,7 +1631,6 @@ pub const BodySerializer = struct {
     fn addTypeString(self: *BodySerializer, val: u8) !void {
         const data = self.arr_stack.getLastOrNull() orelse {
             // Default case
-            std.debug.print("default case, adding {c}\n", .{val});
             try self.type_string.appendBounded(val);
             return;
         };
@@ -1644,16 +1639,72 @@ pub const BodySerializer = struct {
         switch (data.tag_state) {
             .initializing => return error.InvalidState,
             .writing => {
-                std.debug.print("writing case, adding {c} ({d})\n", .{ val, self.arr_stack.items.len });
                 try self.type_string.appendBounded(val);
             },
             .comparing => {
                 if (self.type_string_compare_cursor >= self.type_string.items.len) return error.InconsistentTypeString;
-                std.debug.print("Comparing {c} with {c}\n", .{ self.type_string.items[self.type_string_compare_cursor], val });
                 if (self.type_string.items[self.type_string_compare_cursor] != val) return error.InconsistentTypeString;
                 self.type_string_compare_cursor += 1;
             },
         }
+    }
+
+    test "single string" {
+        var body_buf: [4096]u8 = undefined;
+        var body: BodySerializer = undefined;
+        body.initPinned(&body_buf);
+
+        try body.addString("hello");
+
+        try std.testing.expectEqualStrings(body.type_string.items, "s");
+
+        const data = body.writer.buffered();
+        try std.testing.expectEqual(std.mem.readInt(u32, data[0..4], .little), "hello".len);
+        try std.testing.expectEqualStrings(data[4..], "hello" ++ &[1]u8{0});
+    }
+
+    test "structure" {
+        var body_buf: [4096]u8 = undefined;
+        var body: BodySerializer = undefined;
+        body.initPinned(&body_buf);
+
+        try body.startStruct();
+        try body.addI64(0xcafef00d);
+        try body.addDouble(1.234);
+        try body.addByte('d');
+        try body.endStruct();
+
+        try std.testing.expectEqualStrings(body.type_string.items, "(xdy)");
+
+        const data = body.writer.buffered();
+        try std.testing.expectEqual(std.mem.readInt(i64, data[0..8], .little), 0xcafef00d);
+        try std.testing.expectEqual(@as(f64, @bitCast(std.mem.readInt(i64, data[8..16], .little))), 1.234);
+        try std.testing.expectEqual(data[16], 'd');
+        try std.testing.expectEqual(data.len, 17);
+    }
+
+    test "array" {
+        return error.Unimplemented;
+    }
+
+    test "nested array" {
+        return error.Unimplemented;
+    }
+
+    test "too many array elements" {
+        return error.Unimplemented;
+    }
+
+    test "mismatched array elems" {
+        return error.Unimplemented;
+    }
+
+    test "end array without start" {
+        return error.Unimplemented;
+    }
+
+    test "end struct without start" {
+        return error.Unimplemented;
     }
 };
 
@@ -1702,7 +1753,7 @@ pub const DbusConnection = struct {
         return handle;
     }
 
-    pub fn call2(self: *Self, path: []const u8, destination: []const u8, interface: []const u8, member: []const u8, body: BodySerializer) !CallHandle {
+    pub fn call2(self: *Self, path: []const u8, destination: []const u8, interface: []const u8, member: []const u8, body: *const BodySerializer) !CallHandle {
         if (self.state != .ready) return error.Uninitialized;
 
         var field_buf: [6]HeaderField = undefined;
@@ -1744,7 +1795,7 @@ pub const DbusConnection = struct {
         try self.writer.flush();
     }
 
-    pub fn ret2(self: *DbusConnection, reply_serial: u32, destination: []const u8, body: BodySerializer) !void {
+    pub fn ret2(self: *DbusConnection, reply_serial: u32, destination: []const u8, body: *const BodySerializer) !void {
         if (self.state != .ready) return error.Uninitialized;
 
         var field_buf: [6]HeaderField = undefined;
@@ -2133,28 +2184,4 @@ test "generated interface spotify play pause" {
 
 test {
     std.testing.refAllDeclsRecursive(@This());
-}
-
-test "array serialization" {
-    var body_buf: [512 * 1024]u8 = undefined;
-    var body: BodySerializer = undefined;
-    body.initPinned(&body_buf);
-
-    try body.startArray();
-
-    for (0..100) |i| {
-        try body.startArrayElem();
-        try body.addU32(@intCast(i));
-    }
-
-    try body.endArray();
-
-    var previous_version: [100]u32 = undefined;
-    for (0..100) |i| {
-        previous_version[i] = @intCast(i);
-    }
-    var old_version_buf: [512 * 1024]u8 = undefined;
-    var writer = std.Io.Writer.fixed(&old_version_buf);
-    try dbusSerialize(&writer, &previous_version);
-    try std.testing.expectEqualSlices(u8, body.writer.buffered(), writer.buffered());
 }

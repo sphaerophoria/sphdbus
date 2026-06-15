@@ -60,17 +60,17 @@ fn dodgeReservedKeyword(val: []const u8) []const u8 {
     };
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     var alloc_buf: [4 * 1024 * 1024]u8 = undefined;
     var root_alloc = sphtud.alloc.BufAllocator.init(&alloc_buf);
     const scratch = root_alloc.backLinear();
 
-    const args = try std.process.argsAlloc(root_alloc.allocator());
+    const args = try init.args.toSlice(root_alloc.allocator());
     const schema_path = args[1];
     const output_path = args[2];
 
-    const f = try std.fs.cwd().openFile(schema_path, .{});
-    var f_reader = f.reader(try root_alloc.allocator().alloc(u8, 4096));
+    const f = try sphtud.io.open(schema_path, .{}, 0);
+    var f_reader = sphtud.io.Reader.init(f, try root_alloc.allocator().alloc(u8, 4096));
 
     var content_writer = std.Io.Writer.Discarding.init(&.{});
     var parser = sphtud.xml.Parser.init(&f_reader.interface);
@@ -256,8 +256,8 @@ pub fn main() !void {
     const written = f_writer.written();
     const written_sentinel = written[0 .. written.len - 1 :0];
     const parsed = try std.zig.Ast.parse(root_alloc.allocator(), written_sentinel, .zig);
-    var out_f = try std.fs.cwd().createFile(output_path, .{});
-    var actual_f_writer = out_f.writer(try root_alloc.allocator().alloc(u8, 4096));
+    const out_f = try sphtud.io.open(output_path, .{ .ACCMODE = .RDWR, .CREAT = true, .TRUNC = true }, 0o664);
+    var actual_f_writer = sphtud.io.Writer.init(out_f, try root_alloc.allocator().alloc(u8, 4096));
     try parsed.render(root_alloc.allocator(), &actual_f_writer.interface, .{});
     //try actual_f_writer.interface.writeAll(written_sentinel);
     try actual_f_writer.interface.flush();

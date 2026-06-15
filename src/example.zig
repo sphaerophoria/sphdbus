@@ -6,22 +6,28 @@ const mpris = @import("mpris");
 
 const DbusHandler = struct {
     connection: dbus.DbusConnection,
-    stream: std.net.Stream,
+    stream: std.posix.fd_t,
     state: union(enum) {
         wait_initialize,
         wait_volume: dbus.CallHandle,
     },
 
-    pub fn init(alloc: std.mem.Allocator) !DbusHandler {
-        const stream = try dbus.sessionBus();
+    pub fn init(alloc: std.mem.Allocator, env: std.process.Environ) !DbusHandler {
+        const bus_path = try dbus.sessionBusPath(env);
 
-        const reader = try alloc.create(std.net.Stream.Reader);
-        reader.* = stream.reader(try alloc.alloc(u8, 4096));
+        const system = sphtud.io.system;
+        const stream = try sphtud.io.socket(system.AF.UNIX, system.SOCK.STREAM, 0);
+        try sphtud.io.connectUnix(stream, try .init(bus_path));
 
-        const writer = try alloc.create(std.net.Stream.Writer);
-        writer.* = stream.writer(try alloc.alloc(u8, 4096));
+        try sphtud.io.setBlockMode(stream, .block);
 
-        const connection = try dbus.DbusConnection.init(reader.interface(), &writer.interface);
+        const reader = try alloc.create(sphtud.io.Reader);
+        reader.* = sphtud.io.Reader.init(stream, try alloc.alloc(u8, 4096));
+
+        const writer = try alloc.create(sphtud.io.Writer);
+        writer.* = sphtud.io.Writer.init(stream, try alloc.alloc(u8, 4096));
+
+        const connection = try dbus.DbusConnection.init(&reader.interface, &writer.interface);
 
         return .{
             .stream = stream,
@@ -31,7 +37,7 @@ const DbusHandler = struct {
     }
 
     pub fn deinit(self: *DbusHandler) void {
-        self.stream.close();
+        sphtud.io.close(self.stream);
     }
 
     fn poll(self: *DbusHandler, options: dbus.ParseOptions) !void {
@@ -94,7 +100,7 @@ const DbusHandler = struct {
     }
 };
 
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     var alloc_buf: [1 * 1024 * 1024]u8 = undefined;
     var buf_alloc = sphtud.alloc.BufAllocator.init(&alloc_buf);
 
@@ -106,7 +112,7 @@ pub fn main() !void {
         .diagnostics = &diagnostics,
     };
 
-    var handler = try DbusHandler.init(alloc);
+    var handler = try DbusHandler.init(alloc, init.environ);
     defer handler.deinit();
 
     handler.poll(parse_options) catch |e| {
@@ -115,7 +121,8 @@ pub fn main() !void {
             std.log.err("{s}", .{diagnostics_msg});
         }
         var buf: [4096]u8 = undefined;
-        var stderr = std.fs.File.stderr().writer(&buf);
+
+        var stderr = sphtud.io.Writer.init(2, &buf);
         try diagnostics.dumpPacket(&stderr.interface);
         try stderr.interface.flush();
         return e;

@@ -1096,7 +1096,7 @@ test "genIntrospectionResponse full definition" {
 fn getDirectChildPathName(introspection_path: []const u8, service_path: []const u8) ?[]const u8 {
     if (service_path.len <= introspection_path.len) return null;
 
-    const trimmed_introspection_path = std.mem.trimRight(u8, introspection_path, "/");
+    const trimmed_introspection_path = std.mem.trimEnd(u8, introspection_path, "/");
     if (!std.mem.startsWith(u8, service_path, trimmed_introspection_path)) {
         return null;
     }

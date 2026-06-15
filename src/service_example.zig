@@ -53,7 +53,7 @@ fn writeResponse(scratch: std.mem.Allocator, message: dbus.ParsedMessage, connec
                             dbus.DbusString{ .inner = s },
                         );
                     },
-                    .CallMe => |_| {
+                    .CallMe => {
                         try connection.ret(
                             message.serial,
                             message.headers.sender.?.inner,
@@ -85,25 +85,27 @@ fn dumpDiagnostics(diagnostics: dbus.DbusErrorDiagnostics) !void {
     }
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     var alloc_buf: [1 * 1024 * 1024]u8 = undefined;
     var buf_alloc = sphtud.alloc.BufAllocator.init(&alloc_buf);
 
     const alloc = buf_alloc.allocator();
 
-    const stream = try dbus.sessionBus();
+    const bus_path = try dbus.sessionBusPath(init.environ);
+    const system = sphtud.io.system;
+    const socket = try sphtud.io.socket(system.AF.UNIX, system.SOCK.STREAM, 0);
+    try sphtud.io.connectUnix(socket, try .init(bus_path));
 
-    const reader = try alloc.create(std.net.Stream.Reader);
-    reader.* = stream.reader(try alloc.alloc(u8, 4096));
+    try sphtud.io.setBlockMode(socket, .block);
 
-    const writer = try alloc.create(std.net.Stream.Writer);
-    writer.* = stream.writer(try alloc.alloc(u8, 4096));
+    var reader = sphtud.io.Reader.init(socket, try alloc.alloc(u8, 4096));
+    var writer = sphtud.io.Writer.init(socket, try alloc.alloc(u8, 4096));
 
     var diagnostics = dbus.DbusErrorDiagnostics.init(try alloc.alloc(u8, 4096));
     const parse_options = dbus.ParseOptions{
         .diagnostics = &diagnostics,
     };
-    var connection = try dbus.DbusConnection.init(reader.interface(), &writer.interface);
+    var connection = try dbus.DbusConnection.init(&reader.interface, &writer.interface);
     while (try connection.poll(parse_options) != .initialized) {}
 
     // FIXME: Registration of name maybe should be owned by sphdbus

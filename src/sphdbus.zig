@@ -4,10 +4,9 @@ const builtin = @import("builtin");
 
 pub const service = @import("service.zig");
 
-pub fn sessionBus() !std.net.Stream {
-    const session_address = std.posix.getenv("DBUS_SESSION_BUS_ADDRESS") orelse return error.NoSessionAddress;
-    const socket_path = try extractUnixPathFromAddress(session_address);
-    return try std.net.connectUnixSocket(socket_path);
+pub fn sessionBusPath(env: std.process.Environ) ![]const u8 {
+    const session_address = env.getPosix("DBUS_SESSION_BUS_ADDRESS") orelse return error.NoSessionAddress;
+    return try extractUnixPathFromAddress(session_address);
 }
 
 fn extractUnixPathFromAddress(address: []const u8) ![]const u8 {
@@ -511,7 +510,7 @@ const HeaderIt = struct {
 
         try dbus_reader.alignForwards(8);
         const header_field_byte = try dbus_reader.readByte();
-        const header_field = std.meta.intToEnum(HeaderFieldTag, header_field_byte) catch {
+        const header_field = std.enums.fromInt(HeaderFieldTag, header_field_byte) orelse {
             return makeDbusParseError(
                 options.diagnostics,
                 &self.fixed_reader,
@@ -549,7 +548,7 @@ pub const ParsedMessage = struct {
         };
 
         const endianness_byte = try dbus_reader.readByte();
-        const endianness = std.meta.intToEnum(DbusEndianness, endianness_byte) catch {
+        const endianness = std.enums.fromInt(DbusEndianness, endianness_byte) orelse {
             return makeDbusParseError(
                 diagnostics,
                 &io_reader,
@@ -559,7 +558,7 @@ pub const ParsedMessage = struct {
             );
         };
         const message_type_byte = try dbus_reader.readByte();
-        const message_type = std.meta.intToEnum(MsgType, message_type_byte) catch {
+        const message_type = std.enums.fromInt(MsgType, message_type_byte) orelse {
             return makeDbusParseError(
                 diagnostics,
                 &io_reader,
@@ -570,7 +569,7 @@ pub const ParsedMessage = struct {
         };
         const flags = try dbus_reader.readByte();
         const version_byte = try dbus_reader.readByte();
-        const major_version = std.meta.intToEnum(DBusVersion, version_byte) catch {
+        const major_version = std.enums.fromInt(DBusVersion, version_byte) orelse {
             return makeDbusParseError(
                 diagnostics,
                 &io_reader,
@@ -847,7 +846,7 @@ pub const DbusConnectionInitializer = struct {
 
     pub fn init(io_writer: *std.Io.Writer) !DbusConnectionInitializer {
         try io_writer.writeByte(0);
-        try io_writer.print("AUTH EXTERNAL {f}\r\n", .{AuthUidFormatter{ .uid = std.posix.getuid() }});
+        try io_writer.print("AUTH EXTERNAL {f}\r\n", .{AuthUidFormatter{ .uid = std.os.linux.getuid() }});
         try io_writer.flush();
 
         return .{
@@ -1661,5 +1660,5 @@ test "generated interface spotify play pause" {
 }
 
 test {
-    std.testing.refAllDeclsRecursive(@This());
+    std.testing.refAllDecls(@This());
 }

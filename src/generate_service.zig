@@ -314,10 +314,8 @@ fn genInterfaceMethod(method: *DbusSchemaParser.Method, p: anytype) !void {
     try zw.closeStructField(p);
 }
 
-fn genDocstring(reader: *std.fs.File.Reader, interface: *DbusSchemaParser.Interface, p: anytype) !void {
-    try reader.seekTo(interface.xml_start);
-
-    try reader.seekTo(interface.xml_start);
+fn genDocstring(reader: *sphtud.io.Reader, interface: *DbusSchemaParser.Interface, p: anytype) !void {
+    try reader.seekTo(@intCast(interface.xml_start));
 
     const xml_len = interface.xml_end - interface.xml_start;
 
@@ -376,7 +374,7 @@ fn genInterfacePropertyType(interface: *DbusSchemaParser.Interface, p: anytype) 
     try zw.closeUnion(p);
 }
 
-fn genInterface(reader: *std.fs.File.Reader, interface: *DbusSchemaParser.Interface, p: anytype) !void {
+fn genInterface(reader: *sphtud.io.Reader, interface: *DbusSchemaParser.Interface, p: anytype) !void {
     try zw.openTaggedUnionField(p, interface.name);
 
     const interface_p = p.indent();
@@ -394,8 +392,8 @@ fn genInterface(reader: *std.fs.File.Reader, interface: *DbusSchemaParser.Interf
     try zw.closeUnionField(p);
 }
 
-fn resolveFullPath(base_path: []const u8, interface_path: []const u8, out_buf: []u8) ![]const u8 {
-    return try std.fmt.bufPrint(
+fn resolveFullPath(base_path: []const u8, interface_path: []const u8, out_buf: []u8) ![:0]const u8 {
+    return try std.fmt.bufPrintZ(
         out_buf,
         "{f}",
         .{
@@ -404,15 +402,15 @@ fn resolveFullPath(base_path: []const u8, interface_path: []const u8, out_buf: [
     );
 }
 
-fn genInterfaces(alloc: sphtud.alloc.LinearAllocator, interface_path: []const u8, p: anytype) !void {
+fn genInterfaces(alloc: sphtud.alloc.LinearAllocator, interface_path: [:0]const u8, p: anytype) !void {
     const cp = alloc.checkpoint();
     defer alloc.restore(cp);
 
-    const interface_f = try std.fs.cwd().openFile(interface_path, .{});
-    defer interface_f.close();
+    const interface_f = try sphtud.io.open(interface_path, .{}, 0);
+    defer sphtud.io.close(interface_f);
 
     var reader_buf: [4096]u8 = undefined;
-    var reader = interface_f.reader(&reader_buf);
+    var reader = sphtud.io.Reader.init(interface_f, &reader_buf);
 
     var xmlr = sphtud.xml.Parser.init(&reader.interface);
     var schema_parser = try DbusSchemaParser.init(alloc.allocator(), alloc.expansion());
@@ -428,11 +426,11 @@ fn genInterfaces(alloc: sphtud.alloc.LinearAllocator, interface_path: []const u8
     }
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     var alloc_buf: [1 * 1024 * 1024]u8 = undefined;
     var alloc = sphtud.alloc.BufAllocator.init(&alloc_buf);
 
-    var args = std.process.args();
+    var args = try init.args.iterateAllocator(alloc.allocator());
 
     // process name
     _ = args.next();
@@ -441,20 +439,20 @@ pub fn main() !void {
     const output_path = args.next() orelse return error.NoOutPath;
     const deps_path = args.next() orelse return error.NoDeps;
 
-    const service_def_file = try std.fs.cwd().openFile(service_def_path, .{});
-    defer service_def_file.close();
+    const service_def_file = try sphtud.io.open(service_def_path, .{}, 0);
+    defer sphtud.io.close(service_def_file);
 
     const base_path = std.fs.path.dirname(service_def_path).?;
     var service_def_reader_buf: [4096]u8 = undefined;
-    var service_f_reader = service_def_file.reader(&service_def_reader_buf);
+    var service_f_reader = sphtud.io.Reader.init(service_def_file, &service_def_reader_buf);
 
-    var output_file = try std.fs.cwd().createFile(output_path, .{});
+    const output_file = try sphtud.io.open(output_path, .{ .ACCMODE = .RDWR, .CREAT = true, .TRUNC = true }, 0o664);
     var output_buf: [4096]u8 = undefined;
-    var output_writer = output_file.writer(&output_buf);
+    var output_writer = sphtud.io.Writer.init(output_file, &output_buf);
 
-    var deps_file = try std.fs.cwd().createFile(deps_path, .{});
+    const deps_file = try sphtud.io.open(deps_path, .{ .ACCMODE = .RDWR, .CREAT = true, .TRUNC = true }, 0o664);
     var deps_buf: [4096]u8 = undefined;
-    var deps_writer = deps_file.writer(&deps_buf);
+    var deps_writer = sphtud.io.Writer.init(deps_file, &deps_buf);
 
     try deps_writer.interface.print("{s}: ", .{output_path});
 

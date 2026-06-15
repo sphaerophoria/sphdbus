@@ -21,9 +21,8 @@ pub const DbusToZigTypeFormatter = struct {
     typ: []const u8,
 
     pub fn format(self: DbusToZigTypeFormatter, writer: *std.Io.Writer) !void {
-        var reader = std.Io.Reader.fixed(self.typ);
         var tokenizer = dbus.SignatureTokenizer{
-            .reader = &reader,
+            .reader = .fixed(self.typ),
             .diagnostics = null,
         };
 
@@ -64,6 +63,7 @@ pub const DbusToZigTypeFormatter = struct {
                     const last_elem = tag_stack.pop();
                     std.debug.assert(last_elem == .@"struct");
                 },
+                .byte => try writer.writeAll("u8"),
                 .u32 => try writer.writeAll("u32"),
                 .u64 => try writer.writeAll("u64"),
                 .i32 => try writer.writeAll("i32"),

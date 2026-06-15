@@ -25,11 +25,13 @@ const InternalMessageHandlerError = error{
 
 pub fn respondError(connection: *dbus.DbusConnection, message: dbus.ParsedMessage, comptime typ: []const u8) !void {
     const sender = message.headers.sender orelse return error.NoSender;
+    var body: dbus.BodySerializer = undefined;
+    body.initPinned(&.{});
     try connection.err(
         message.serial,
         sender.inner,
         .{ .inner = typ },
-        null,
+        &body,
     );
 }
 
@@ -80,26 +82,31 @@ fn handleErrorInner(e: InternalMessageHandlerError, connection: *dbus.DbusConnec
     }
 }
 
-pub fn handleMessage(comptime Def: type, scratch: std.mem.Allocator, message: dbus.ParsedMessage, connection: *dbus.DbusConnection) MessageHandlerError!?Def.Request {
-    return handleMessageInner(Def, scratch, message, connection) catch |e| {
+pub fn handleMessage(comptime Def: type, scratch: std.mem.Allocator, message: dbus.ParsedMessage, connection: *dbus.DbusConnection, options: dbus.ParseOptions) MessageHandlerError!?Def.Request {
+    return handleMessageInner(Def, scratch, message, connection, options) catch |e| {
         try handleError(e, connection, message);
         return null;
     };
 }
 
-pub fn handleMessageInner(comptime Def: type, scratch: std.mem.Allocator, message: dbus.ParsedMessage, connection: *dbus.DbusConnection) InternalMessageHandlerError!?Def.Request {
+pub fn handleMessageInner(comptime Def: type, scratch: std.mem.Allocator, message: dbus.ParsedMessage, connection: *dbus.DbusConnection, options: dbus.ParseOptions) InternalMessageHandlerError!?Def.Request {
     const req_headers = try RequiredHeaders.init(message);
 
-    if (try parseRequest(Def.Request, message, req_headers)) |r| return r;
+    if (try parseRequest(Def.Request, message, req_headers, options)) |r| return r;
 
     try ensureIntrospectionRequest(message, req_headers);
 
     var introspection_writer = std.Io.Writer.Allocating.init(scratch);
     try genIntrospectionResponse(Def, req_headers.path, &introspection_writer.writer);
 
-    try connection.ret(message.serial, req_headers.sender, .{
-        dbus.DbusString{ .inner = introspection_writer.writer.buffered() },
-    });
+    // Body holds a u32 length, the string, a null terminator, and gets aligned
+    // along the way. The string itself is the largest contributor by far.
+    const body_buf = try scratch.alloc(u8, introspection_writer.writer.buffered().len + 16);
+    var body: dbus.BodySerializer = undefined;
+    body.initPinned(body_buf);
+    try body.addString(introspection_writer.writer.buffered());
+
+    try connection.ret(message.serial, req_headers.sender, &body);
 
     return null;
 }
@@ -156,33 +163,33 @@ const PropertyInterfaceReq = enum {
     }
 };
 
-fn parseRequest(comptime T: type, message: dbus.ParsedMessage, required_headers: RequiredHeaders) InternalMessageHandlerError!?T {
+fn parseRequest(comptime T: type, message: dbus.ParsedMessage, required_headers: RequiredHeaders, options: dbus.ParseOptions) InternalMessageHandlerError!?T {
     const TE = std.meta.Tag(T);
     const pe = std.meta.stringToEnum(TE, required_headers.path) orelse {
         return null;
     };
     switch (pe) {
         inline else => |t| {
-            const interface = (try parseRequestPath(UnionType(T, t), message, required_headers)) orelse return null;
+            const interface = (try parseRequestPath(UnionType(T, t), message, required_headers, options)) orelse return null;
             return @unionInit(T, @tagName(t), interface);
         },
     }
 }
 
-fn parseRequestPath(comptime Path: type, message: dbus.ParsedMessage, required_headers: RequiredHeaders) InternalMessageHandlerError!?Path {
+fn parseRequestPath(comptime Path: type, message: dbus.ParsedMessage, required_headers: RequiredHeaders, options: dbus.ParseOptions) InternalMessageHandlerError!?Path {
     const PE = std.meta.Tag(Path);
     const pp = std.meta.stringToEnum(PE, required_headers.interface) orelse {
         return null;
     };
     switch (pp) {
         inline else => |t| {
-            const interface = (try parseRequestInterface(UnionType(Path, t), message, required_headers)) orelse return null;
+            const interface = (try parseRequestInterface(UnionType(Path, t), message, required_headers, options)) orelse return null;
             return @unionInit(Path, @tagName(t), interface);
         },
     }
 }
 
-fn parseRequestInterface(comptime Interface: type, message: dbus.ParsedMessage, required_headers: RequiredHeaders) InternalMessageHandlerError!?Interface {
+fn parseRequestInterface(comptime Interface: type, message: dbus.ParsedMessage, required_headers: RequiredHeaders, options: dbus.ParseOptions) InternalMessageHandlerError!?Interface {
     if (PropertyInterfaceReq.parse(message, required_headers)) |property_req| {
         _ = property_req;
         return error.Unsupported;
@@ -193,12 +200,12 @@ fn parseRequestInterface(comptime Interface: type, message: dbus.ParsedMessage, 
     const MethodUnion = @FieldType(Interface, "method");
 
     // FIXME: Is it an error if the method does not exist here?
-    const method = (try parseRequestMethod(MethodUnion, message, required_headers)) orelse return null;
+    const method = (try parseRequestMethod(MethodUnion, message, required_headers, options)) orelse return null;
 
     return Interface{ .method = method };
 }
 
-fn parseRequestMethod(comptime Method: type, message: dbus.ParsedMessage, required_headers: RequiredHeaders) InternalMessageHandlerError!?Method {
+fn parseRequestMethod(comptime Method: type, message: dbus.ParsedMessage, required_headers: RequiredHeaders, options: dbus.ParseOptions) InternalMessageHandlerError!?Method {
     const MethodE = std.meta.Tag(Method);
 
     // FIXME: Should we error if it's an invalid member name?
@@ -206,7 +213,10 @@ fn parseRequestMethod(comptime Method: type, message: dbus.ParsedMessage, requir
     switch (me) {
         inline else => |t| {
             const Args = @FieldType(Method, @tagName(t));
-            const arg = dbus.dbusParseBody(Args, message, .{}) catch {
+            if (Args == void) return @unionInit(Method, @tagName(t), {});
+
+            var br = dbus.BodyReader.initMessage(message, options) catch return error.InvalidBody;
+            const arg = br.nextTyped(Args) catch {
                 // FIXME: Collect real error into diagnostics
                 return error.InvalidBody;
             };

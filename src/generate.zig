@@ -12,9 +12,8 @@ fn isTypeSupported(name: []const u8, typ: []const u8) bool {
         return false;
     }
 
-    var signature_reader = std.Io.Reader.fixed(typ);
     var tokenizer = dbus.SignatureTokenizer{
-        .reader = &signature_reader,
+        .reader = .fixed(typ),
         .diagnostics = null,
     };
     while (true) {
@@ -156,17 +155,12 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 });
             }
             try f_writer.writer.print(
+                \\                buf: []u8,
                 \\            ) !dbus.CallHandle {{
-                \\                return try self.connection.call(
-                \\                    self.object_path,
-                \\                    self.service,
-                \\                    interface_name_to_serialize,
-                \\                    "{0s}",
-                \\                    .{{
-                \\
-            , .{
-                method.name,
-            });
+                \\                var bs: dbus.BodySerializer = undefined;
+                \\                bs.initPinned(buf);
+                \\                try bs.addTyped(.{{
+            , .{});
 
             arg_it = method.args.iter();
             while (arg_it.next()) |arg| {
@@ -181,9 +175,18 @@ pub fn main(init: std.process.Init.Minimal) !void {
             try f_writer.writer.print(
                 \\                    }},
                 \\                );
+                \\                return try self.connection.call(
+                \\                    self.object_path,
+                \\                    self.service,
+                \\                    interface_name_to_serialize,
+                \\                    "{0s}",
+                \\                    &bs,
+                \\                );
                 \\            }}
                 \\
-            , .{});
+            , .{
+                method.name,
+            });
 
             if (method.ret.len > 0) {
                 // Unimplemented, see parseGetPropertyResponse below
@@ -198,16 +201,20 @@ pub fn main(init: std.process.Init.Minimal) !void {
             try f_writer.writer.print(
                 \\            pub fn @"get{[property_name]s}"(
                 \\                self: Self,
+                \\                buf: []u8,
                 \\            ) !dbus.CallHandle {{
+                \\                var bs: dbus.BodySerializer = undefined;
+                \\                bs.initPinned(buf);
+                \\                try bs.addTyped(.{{
+                \\                      dbus.DbusString {{ .inner = "{[interface_name]s}" }},
+                \\                      dbus.DbusString {{ .inner = "{[property_name]s}" }},
+                \\                }});
                 \\                return try self.connection.call(
                 \\                    self.object_path,
                 \\                    self.service,
                 \\                    "org.freedesktop.DBus.Properties",
                 \\                    "Get",
-                \\                    .{{
-                \\                          dbus.DbusString {{ .inner = "{[interface_name]s}" }},
-                \\                          dbus.DbusString {{ .inner = "{[property_name]s}" }},
-                \\                    }},
+                \\                    &bs,
                 \\                );
                 \\            }}
                 \\
@@ -215,24 +222,29 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 \\                message: dbus.ParsedMessage,
                 \\                options: dbus.ParseOptions,
                 \\            ) !{[zig_type]f} {{
-                \\                const v = try dbus.dbusParseBody(dbus.ParseVariant, message, options);
-                \\                return v.toConcrete({[zig_type]f}, message.endianness, options);
+                \\                var br = try dbus.BodyReader.initMessage(message, options);
+                \\                var v = try br.nextVariant();
+                \\                return v.nextTyped({[zig_type]f});
                 \\            }}
                 \\
                 \\            pub fn @"set{[property_name]s}Property"(
                 \\                self: Self,
+                \\                buf: []u8,
                 \\                val: {[zig_type]f},
                 \\            ) !void {{
+                \\                var bs: dbus.BodySerializer = undefined;
+                \\                bs.initPinned(buf);
+                \\                try bs.addTyped(.{{
+                \\                      dbus.DbusString {{ .inner = "{[interface_name]s}" }},
+                \\                      dbus.DbusString {{ .inner = "{[property_name]s}" }},
+                \\                      dbus.serializationVariant(val),
+                \\                }});
                 \\                _ = try self.connection.call(
                 \\                    self.object_path,
                 \\                    self.service,
                 \\                    "org.freedesktop.DBus.Properties",
                 \\                    "Set",
-                \\                    .{{
-                \\                          dbus.DbusString {{ .inner = "{[interface_name]s}" }},
-                \\                          dbus.DbusString {{ .inner = "{[property_name]s}" }},
-                \\                          dbus.serializationVariant(val),
-                \\                    }},
+                \\                    &bs,
                 \\                );
                 \\            }}
                 \\

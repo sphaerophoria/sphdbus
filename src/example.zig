@@ -49,23 +49,38 @@ const DbusHandler = struct {
                 .service = "org.mpris.MediaPlayer2.spotify",
                 .object_path = "/org/mpris/MediaPlayer2",
             };
+            var body_buf: [4096]u8 = undefined;
 
             switch (self.state) {
                 .wait_initialize => {
                     if (res == .initialized) {
-                        self.state = .{ .wait_volume = try player.getVolume() };
+                        self.state = .{ .wait_volume = try player.getMetadata(&body_buf) };
                     }
                 },
                 .wait_volume => |wait_for| {
                     if (res != .response) continue;
                     if (res.response.handle.inner != wait_for.inner) continue;
 
-                    const parsed = try mpris.OrgMprisMediaPlayer2Player.parseGetVolumeResponse(
-                        res.response.header,
-                        options,
-                    );
+                    const message = res.response.header;
 
-                    std.debug.print("{d}\n", .{parsed});
+                    var response = try mpris.OrgMprisMediaPlayer2Player.parseGetMetadataResponse(message, .{});
+
+                    while (try response.next()) |arr_elem| {
+                        var v = arr_elem.val;
+                        std.debug.print("{s}: ", .{arr_elem.key.inner});
+
+                        while (try v.inner.next()) |elem| switch (elem) {
+                            .byte => |ev| std.debug.print("{c}", .{ev}),
+                            .bool => |ev| std.debug.print("{any}", .{ev}),
+                            .variant => std.debug.print("variant", .{}),
+                            inline .u32, .i32, .i64, .u64, .f64 => |ev| std.debug.print("{d}", .{ev}),
+                            .array => std.debug.print("array", .{}),
+                            inline .string, .object, .signature => |ev| std.debug.print("{s}", .{ev.inner}),
+                            .kv => std.debug.print("kv", .{}),
+                            .@"struct" => std.debug.print("struct", .{}),
+                        };
+                        std.debug.print("\n", .{});
+                    }
 
                     return;
                 },

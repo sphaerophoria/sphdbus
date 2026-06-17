@@ -48,7 +48,6 @@ fn writeResponse(scratch: std.mem.Allocator, message: dbus.ParsedMessage, connec
 
     const body_buf = try scratch.alloc(u8, 512 * 1024);
     var body: dbus.BodySerializer = undefined;
-    body.initPinned(body_buf);
     switch (request) {
         .@"/dev/sphaerophoria/TestService" => |path_req| switch (path_req) {
             .@"dev.sphaerophoria.TestService" => |interface_req| switch (interface_req) {
@@ -56,6 +55,7 @@ fn writeResponse(scratch: std.mem.Allocator, message: dbus.ParsedMessage, connec
                     .Hello => |args| {
                         var buf: [4096]u8 = undefined;
                         const s = try std.fmt.bufPrint(&buf, "Hello {s}", .{args.Name.inner});
+                        body.initPinned(body_buf, args.retSignature());
 
                         try body.addString(s);
 
@@ -70,15 +70,16 @@ fn writeResponse(scratch: std.mem.Allocator, message: dbus.ParsedMessage, connec
                         var buf: [4096]u8 = undefined;
                         const s = try std.fmt.bufPrint(&buf, "Goodbye {s}", .{args.Name.inner});
 
+                        body.initPinned(body_buf, args.retSignature());
                         try body.addString(s);
-                        // FIXME: Return types should be typed
                         try connection.ret(
                             message.serial,
                             message.headers.sender.?.inner,
                             &body,
                         );
                     },
-                    .CallMe => {
+                    .CallMe => |p| {
+                        body.initPinned(body_buf, p.retSignature());
                         try body.addString("maybe");
                         try connection.ret(
                             message.serial,
@@ -86,7 +87,8 @@ fn writeResponse(scratch: std.mem.Allocator, message: dbus.ParsedMessage, connec
                             &body,
                         );
                     },
-                    .GetStructure => {
+                    .GetStructure => |args| {
+                        body.initPinned(body_buf, args.retSignature());
                         try body.startStruct();
                         try body.addI64(0xcafef00d);
                         try body.addDouble(1.234);
@@ -100,7 +102,8 @@ fn writeResponse(scratch: std.mem.Allocator, message: dbus.ParsedMessage, connec
                             &body,
                         );
                     },
-                    .GetUintArray => {
+                    .GetUintArray => |args| {
+                        body.initPinned(body_buf, args.retSignature());
                         try body.startArray();
 
                         for (0..100) |i| {
@@ -116,7 +119,8 @@ fn writeResponse(scratch: std.mem.Allocator, message: dbus.ParsedMessage, connec
                             &body,
                         );
                     },
-                    .GetNestedStructArray => {
+                    .GetNestedStructArray => |args| {
+                        body.initPinned(body_buf, args.retSignature());
                         try body.startArray();
 
                         for (0..2) |j| {
@@ -143,7 +147,8 @@ fn writeResponse(scratch: std.mem.Allocator, message: dbus.ParsedMessage, connec
                             &body,
                         );
                     },
-                    .GetStructArray => {
+                    .GetStructArray => |args| {
+                        body.initPinned(body_buf, args.retSignature());
                         try body.startArray();
 
                         for (0..100) |i| {
@@ -222,7 +227,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     // FIXME: Registration of name maybe should be owned by sphdbus
     var request_name_buf: [256]u8 = undefined;
     var request_name_body: dbus.BodySerializer = undefined;
-    request_name_body.initPinned(&request_name_buf);
+    request_name_body.initPinned(&request_name_buf, "su");
     try request_name_body.addString("dev.sphaerophoria.TestService");
     try request_name_body.addU32(0);
 
@@ -270,11 +275,11 @@ pub fn main(init: std.process.Init.Minimal) !void {
                         error.Unrecoverable => {
                             std.log.err("Unrecoverable error, shutting down", .{});
                             try dumpDiagnostics(diagnostics);
-                            break;
+                            break :outer;
                         },
                         error.ParseError => {
                             try dumpDiagnostics(diagnostics);
-                            break;
+                            break :outer;
                         },
                         error.EndOfStream, error.WriteFailed => {
                             std.log.info("IO failure, shutting down: {t}", .{e});
@@ -288,7 +293,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
                     const params = switch (res) {
                         .call => |params| params,
-                        else => break,
+                        else => continue,
                     };
 
                     switch (try writeResponse(buf_alloc.backAllocator(), params, &connection)) {
@@ -303,7 +308,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
                 var signal_buf: [64]u8 = undefined;
                 var signal_body: dbus.BodySerializer = undefined;
-                signal_body.initPinned(&signal_buf);
+                signal_body.initPinned(&signal_buf, "s");
                 try signal_body.addString("hi");
 
                 try connection.signal(

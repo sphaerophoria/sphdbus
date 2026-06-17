@@ -26,7 +26,7 @@ const InternalMessageHandlerError = error{
 pub fn respondError(connection: *dbus.DbusConnection, message: dbus.ParsedMessage, comptime typ: []const u8) !void {
     const sender = message.headers.sender orelse return error.NoSender;
     var body: dbus.BodySerializer = undefined;
-    body.initPinned(&.{});
+    body.initPinned(&.{}, "");
     try connection.err(
         message.serial,
         sender.inner,
@@ -103,7 +103,7 @@ pub fn handleMessageInner(comptime Def: type, scratch: std.mem.Allocator, messag
     // along the way. The string itself is the largest contributor by far.
     const body_buf = try scratch.alloc(u8, introspection_writer.writer.buffered().len + 16);
     var body: dbus.BodySerializer = undefined;
-    body.initPinned(body_buf);
+    body.initPinned(body_buf, "s");
     try body.addString(introspection_writer.writer.buffered());
 
     try connection.ret(message.serial, req_headers.sender, &body);

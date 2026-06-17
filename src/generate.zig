@@ -96,9 +96,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
         var method_it = interface.methods.iter();
         while (method_it.next()) |method| {
-            const cp = scratch.checkpoint();
-            defer scratch.restore(cp);
-
             if (!isMethodSupported(method.*)) {
                 continue;
             }
@@ -136,7 +133,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
         method_it = interface.methods.iter();
         while (method_it.next()) |method| {
+            const cp = scratch.checkpoint();
+            defer scratch.restore(cp);
+
             if (!isMethodSupported(method.*)) continue;
+
+            const sig = try method.argsSignature(scratch.allocator());
+
             try f_writer.writer.print(
                 \\            pub fn @"{f}"(
                 \\                self: Self,
@@ -157,9 +160,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 \\                buf: []u8,
                 \\            ) !dbus.CallHandle {{
                 \\                var bs: dbus.BodySerializer = undefined;
-                \\                bs.initPinned(buf);
+                \\                bs.initPinned(buf, "{s}");
                 \\                try bs.addTyped(.{{
-            , .{});
+            , .{sig});
 
             arg_it = method.args.iter();
             while (arg_it.next()) |arg| {
@@ -203,7 +206,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 \\                buf: []u8,
                 \\            ) !dbus.CallHandle {{
                 \\                var bs: dbus.BodySerializer = undefined;
-                \\                bs.initPinned(buf);
+                \\                bs.initPinned(buf, "ss");
                 \\                try bs.addTyped(.{{
                 \\                      dbus.DbusString {{ .inner = "{[interface_name]s}" }},
                 \\                      dbus.DbusString {{ .inner = "{[property_name]s}" }},
@@ -232,7 +235,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 \\                val: {[zig_type]f},
                 \\            ) !void {{
                 \\                var bs: dbus.BodySerializer = undefined;
-                \\                bs.initPinned(buf);
+                \\                bs.initPinned(buf, "ssv");
                 \\                try bs.addTyped(.{{
                 \\                      dbus.DbusString {{ .inner = "{[interface_name]s}" }},
                 \\                      dbus.DbusString {{ .inner = "{[property_name]s}" }},

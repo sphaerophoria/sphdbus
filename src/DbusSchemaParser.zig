@@ -148,6 +148,10 @@ pub const Method = struct {
         };
     }
 
+    pub fn argsSignature(self: *Method, alloc: std.mem.Allocator) ![]const u8 {
+        return signature(alloc, &self.args);
+    }
+
     pub fn retSignature(self: *Method, alloc: std.mem.Allocator) ![]const u8 {
         return signature(alloc, &self.ret);
     }

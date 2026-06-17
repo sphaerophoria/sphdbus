@@ -740,7 +740,7 @@ pub const BodyReader = struct {
 test "BodyReader struct" {
     var body_buf: [4096]u8 = undefined;
     var bs: BodySerializer = undefined;
-    bs.initPinned(&body_buf);
+    bs.initPinned(&body_buf, "(id(us))");
 
     try bs.startStruct();
     {
@@ -778,7 +778,7 @@ test "BodyReader struct" {
 test "BodyReader kv" {
     var body_buf: [4096]u8 = undefined;
     var bs: BodySerializer = undefined;
-    bs.initPinned(&body_buf);
+    bs.initPinned(&body_buf, "{i{us}}");
 
     try bs.startKv();
     {
@@ -813,7 +813,7 @@ test "BodyReader kv" {
 test "BodyReader map" {
     var body_buf: [4096]u8 = undefined;
     var bs: BodySerializer = undefined;
-    bs.initPinned(&body_buf);
+    bs.initPinned(&body_buf, "a{iu}");
 
     try bs.startArray();
     for (0..5) |i| {
@@ -1467,7 +1467,7 @@ pub const DbusConnectionInitializer = struct {
                     },
                 };
                 var empty_body: BodySerializer = undefined;
-                empty_body.initPinned(&.{});
+                empty_body.initPinned(&.{}, "");
                 hello_message.serialize(io_writer, &empty_body) catch {
                     return error.Unrecoverable;
                 };
@@ -1486,7 +1486,7 @@ pub const DbusConnectionInitializer = struct {
 test "invalid array len crash" {
     var body_buf: [4096]u8 = undefined;
     var body: BodySerializer = undefined;
-    body.initPinned(&body_buf);
+    body.initPinned(&body_buf, "au");
 
     try body.startArray();
     for (1..6) |i| {
@@ -1646,7 +1646,8 @@ pub const BodySerializer = struct {
         },
     };
 
-    pub fn initPinned(self: *BodySerializer, buf: []u8) void {
+    pub fn initPinned(self: *BodySerializer, buf: []u8, sig: []const u8) void {
+        _ = sig;
         self.writer = std.Io.Writer.fixed(buf);
         self.body = .{
             .pos = 0,
@@ -1889,7 +1890,7 @@ pub const BodySerializer = struct {
     test "single string" {
         var body_buf: [4096]u8 = undefined;
         var body: BodySerializer = undefined;
-        body.initPinned(&body_buf);
+        body.initPinned(&body_buf, "s");
 
         try body.addString("hello");
 
@@ -1903,7 +1904,7 @@ pub const BodySerializer = struct {
     test "structure" {
         var body_buf: [4096]u8 = undefined;
         var body: BodySerializer = undefined;
-        body.initPinned(&body_buf);
+        body.initPinned(&body_buf, "(xdy)");
 
         try body.startStruct();
         try body.addI64(0xcafef00d);
@@ -1923,7 +1924,7 @@ pub const BodySerializer = struct {
     test "variant primitive" {
         var body_buf: [4096]u8 = undefined;
         var body: BodySerializer = undefined;
-        body.initPinned(&body_buf);
+        body.initPinned(&body_buf, "sv");
 
         try body.addString("org.example.Foo");
         try body.startVariant("d");
@@ -1937,7 +1938,7 @@ pub const BodySerializer = struct {
     test "mismatched array elems" {
         var body_buf: [4096]u8 = undefined;
         var body: BodySerializer = undefined;
-        body.initPinned(&body_buf);
+        body.initPinned(&body_buf, "au");
 
         try body.startArray();
         try body.startArrayElem();
@@ -1949,7 +1950,7 @@ pub const BodySerializer = struct {
     test "end array without start" {
         var body_buf: [4096]u8 = undefined;
         var body: BodySerializer = undefined;
-        body.initPinned(&body_buf);
+        body.initPinned(&body_buf, "");
 
         try std.testing.expectError(error.NoArray, body.endArray());
     }

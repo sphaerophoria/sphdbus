@@ -756,10 +756,8 @@ test "BodyReader struct" {
     }
     try bs.endStruct();
 
-    try std.testing.expectEqualStrings("(id(us))", bs.type_string.items);
-
     var br = BodyReader.init(
-        bs.type_string.items,
+        bs.type_string,
         bs.body.writer.buffered(),
         .little,
         .{},
@@ -792,10 +790,10 @@ test "BodyReader kv" {
     }
     try bs.endKv();
 
-    try std.testing.expectEqualStrings("{i{us}}", bs.type_string.items);
+    try std.testing.expectEqualStrings("{i{us}}", bs.type_string);
 
     var br = BodyReader.init(
-        bs.type_string.items,
+        bs.type_string,
         bs.body.writer.buffered(),
         .little,
         .{},
@@ -828,10 +826,10 @@ test "BodyReader map" {
     }
     try bs.endArray();
 
-    try std.testing.expectEqualStrings("a{iu}", bs.type_string.items);
+    try std.testing.expectEqualStrings("a{iu}", bs.type_string);
 
     var br = BodyReader.init(
-        bs.type_string.items,
+        bs.type_string,
         bs.body.writer.buffered(),
         .little,
         .{},
@@ -1282,9 +1280,9 @@ pub const DbusHeader = struct {
     }
 
     fn appendBodySignature(header_fields: *std.ArrayList(HeaderField), body: *const BodySerializer) !void {
-        if (body.type_string.items.len == 0) return;
+        if (body.type_string.len == 0) return;
         try header_fields.appendBounded(.{
-            .signature = .{ .inner = body.type_string.items },
+            .signature = .{ .inner = body.type_string },
         });
     }
 
@@ -1504,7 +1502,7 @@ test "invalid array len crash" {
     body_buf[0] = 25;
 
     var br = BodyReader.init(
-        body.type_string.items,
+        body.type_string,
         body.writer.buffered(),
         .little,
         .{},
@@ -1626,12 +1624,11 @@ pub const BodySerializer = struct {
     writer: std.Io.Writer,
     body: DbusMessageWriter,
 
-    type_string_buf: [255]u8,
-    type_string: std.ArrayList(u8),
+    type_string: []const u8,
+    type_string_compare_cursor: usize,
 
     arr_stack_buf: [256]ArrStackItem,
     arr_stack: std.ArrayList(ArrStackItem),
-    type_string_compare_cursor: usize,
 
     variant_depth: u8,
 
@@ -1639,21 +1636,15 @@ pub const BodySerializer = struct {
         size: *[4]u8,
         type_start: usize,
         data_start: ?usize,
-        tag_state: enum {
-            initializing,
-            writing,
-            comparing,
-        },
     };
 
     pub fn initPinned(self: *BodySerializer, buf: []u8, sig: []const u8) void {
-        _ = sig;
         self.writer = std.Io.Writer.fixed(buf);
         self.body = .{
             .pos = 0,
             .writer = &self.writer,
         };
-        self.type_string = .initBuffer(&self.type_string_buf);
+        self.type_string = sig;
         self.arr_stack = .initBuffer(&self.arr_stack_buf);
         self.type_string_compare_cursor = 0;
         self.variant_depth = 0;
@@ -1812,23 +1803,19 @@ pub const BodySerializer = struct {
         var new_arr_stack = ArrStackItem{
             .size = size_ptr,
             .data_start = null,
-            .type_start = self.type_string.items.len,
-            .tag_state = .initializing,
+            .type_start = self.type_string_compare_cursor,
         };
 
         if (self.arr_stack.getLastOrNull()) |data| {
-            if (data.tag_state == .comparing) {
-                // If we are on the second element of an array, we are no
-                // longer filling in the type info. If we have nested arrays we
-                // need to respect that we are in the second iteration of some
-                // array, even if we are in the first iteration of our own.
-                // Here the type start/type_string_compare_cursor are no longer
-                // just at the end, but where we inserted the type data last time
+            // If we are on the second element of an array, we are no
+            // longer filling in the type info. If we have nested arrays we
+            // need to respect that we are in the second iteration of some
+            // array, even if we are in the first iteration of our own.
+            // Here the type start/type_string_compare_cursor are no longer
+            // just at the end, but where we inserted the type data last time
 
-                self.type_string_compare_cursor = data.type_start;
-                new_arr_stack.type_start = self.type_string_compare_cursor + 1;
-                new_arr_stack.tag_state = .comparing;
-            }
+            self.type_string_compare_cursor = data.type_start;
+            new_arr_stack.type_start = self.type_string_compare_cursor + 1;
         }
 
         try self.arr_stack.appendBounded(new_arr_stack);
@@ -1850,12 +1837,6 @@ pub const BodySerializer = struct {
         const data = self.getArrStackEnd() orelse return error.NoArray;
 
         self.type_string_compare_cursor = data.type_start;
-
-        switch (data.tag_state) {
-            .initializing => data.tag_state = .writing,
-            .writing => data.tag_state = .comparing,
-            .comparing => {},
-        }
     }
 
     fn getArrStackEnd(self: *BodySerializer) ?*ArrStackItem {
@@ -1869,22 +1850,9 @@ pub const BodySerializer = struct {
         // touch type_string or the array comparison cursor at all.
         if (self.variant_depth > 0) return;
 
-        const data = self.arr_stack.getLastOrNull() orelse {
-            try self.type_string.appendBounded(val);
-            return;
-        };
-
-        switch (data.tag_state) {
-            .initializing => return error.SerializeError,
-            .writing => {
-                try self.type_string.appendBounded(val);
-            },
-            .comparing => {
-                if (self.type_string_compare_cursor >= self.type_string.items.len) return error.SerializeError;
-                if (self.type_string.items[self.type_string_compare_cursor] != val) return error.SerializeError;
-                self.type_string_compare_cursor += 1;
-            },
-        }
+        if (self.type_string_compare_cursor >= self.type_string.len) return error.SerializeError;
+        if (self.type_string[self.type_string_compare_cursor] != val) return error.SerializeError;
+        self.type_string_compare_cursor += 1;
     }
 
     test "single string" {
@@ -1894,7 +1862,7 @@ pub const BodySerializer = struct {
 
         try body.addString("hello");
 
-        try std.testing.expectEqualStrings(body.type_string.items, "s");
+        try std.testing.expectEqualStrings(body.type_string, "s");
 
         const data = body.writer.buffered();
         try std.testing.expectEqual(std.mem.readInt(u32, data[0..4], .little), "hello".len);
@@ -1912,7 +1880,7 @@ pub const BodySerializer = struct {
         try body.addByte('d');
         try body.endStruct();
 
-        try std.testing.expectEqualStrings(body.type_string.items, "(xdy)");
+        try std.testing.expectEqualStrings(body.type_string, "(xdy)");
 
         const data = body.writer.buffered();
         try std.testing.expectEqual(std.mem.readInt(i64, data[0..8], .little), 0xcafef00d);
@@ -1931,7 +1899,7 @@ pub const BodySerializer = struct {
         try body.addDouble(1.0);
         try body.endVariant();
 
-        try std.testing.expectEqualStrings("sv", body.type_string.items);
+        try std.testing.expectEqualStrings("sv", body.type_string);
         try std.testing.expectEqual(0, body.variant_depth);
     }
 

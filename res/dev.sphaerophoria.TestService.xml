@@ -24,7 +24,7 @@
     <method name="GetNestedStructArray" >
       <arg direction="out" type="aa(sx)" name="value" />
     </method>
-    <signal>
+    <signal name="Update">
       <arg name="message" type="s" />
     </signal>
   </interface>

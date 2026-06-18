@@ -5,4 +5,5 @@ set -ex
 zig fmt build.zig src --check
 zig build
 ./zig-out/bin/dbus_tests
+python3 ./scripts/test_service.py
 

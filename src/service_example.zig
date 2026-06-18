@@ -199,6 +199,12 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     const alloc = buf_alloc.allocator();
 
+    const args = try init.args.toSlice(alloc);
+    const signal_interval_ms: u32 = if (args.len > 1) blk: {
+        const ms = try std.fmt.parseInt(u32, args[1], 10);
+        break :blk ms;
+    } else 1000;
+
     const bus_path = try dbus.sessionBusPath(init.environ);
     const system = sphtud.io.system;
     const socket = try sphtud.io.socket(system.AF.UNIX, system.SOCK.STREAM, 0);
@@ -251,7 +257,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     });
 
     const timer = try sphtud.io.timerfd_create(.BOOTTIME);
-    try sphtud.io.timerfd_settime(timer, .{ .rel = .fromSeconds(1) }, .fromSeconds(1));
+    try sphtud.io.timerfd_settime(timer, .{ .rel = .fromMilliseconds(signal_interval_ms) }, .fromMilliseconds(signal_interval_ms));
 
     try loop.register(.{
         .handle = timer,

@@ -296,12 +296,7 @@ fn genInterfaceProperty(prop: *DbusSchemaParser.Property, p: anytype) !void {
     try zw.field(p, prop.name, helpers.dbusToZigType(prop.typ));
 }
 
-fn genInterfaceMethod(method: *DbusSchemaParser.Method, p: anytype) !void {
-    if (method.args.len == 0) {
-        try zw.field(p, method.name, "void");
-        return;
-    }
-
+fn genInterfaceMethod(scratch: sphtud.alloc.LinearAllocator, method: *DbusSchemaParser.Method, p: anytype) !void {
     try zw.openStructField(p, method.name);
 
     var args_it = method.args.iter();
@@ -310,6 +305,16 @@ fn genInterfaceMethod(method: *DbusSchemaParser.Method, p: anytype) !void {
     while (args_it.next()) |arg| {
         try zw.field(field_printer, arg.name, helpers.dbusToZigType(arg.typ));
     }
+
+    const cp = scratch.checkpoint();
+    defer scratch.restore(cp);
+    const sig = try method.retSignature(scratch.allocator());
+
+    try field_printer.print(
+        \\pub fn retSignature(_: @This()) []const u8 {{
+        \\    return "{s}";
+        \\}}
+    , .{sig});
 
     try zw.closeStructField(p);
 }
@@ -344,14 +349,14 @@ fn genDocstring(reader: *sphtud.io.Reader, interface: *DbusSchemaParser.Interfac
     );
 }
 
-fn genInterfaceMethods(p: anytype, interface: *DbusSchemaParser.Interface) !void {
+fn genInterfaceMethods(scratch: sphtud.alloc.LinearAllocator, p: anytype, interface: *DbusSchemaParser.Interface) !void {
     try zw.openTaggedUnionField(p, "method");
 
     var method_it = interface.methods.iter();
 
     const fp = p.indent();
     while (method_it.next()) |method| {
-        try genInterfaceMethod(method, fp);
+        try genInterfaceMethod(scratch, method, fp);
     }
 
     try zw.closeUnionField(p);
@@ -374,12 +379,12 @@ fn genInterfacePropertyType(interface: *DbusSchemaParser.Interface, p: anytype) 
     try zw.closeUnion(p);
 }
 
-fn genInterface(reader: *sphtud.io.Reader, interface: *DbusSchemaParser.Interface, p: anytype) !void {
+fn genInterface(scratch: sphtud.alloc.LinearAllocator, reader: *sphtud.io.Reader, interface: *DbusSchemaParser.Interface, p: anytype) !void {
     try zw.openTaggedUnionField(p, interface.name);
 
     const interface_p = p.indent();
 
-    try genInterfaceMethods(interface_p, interface);
+    try genInterfaceMethods(scratch, interface_p, interface);
     try zw.field(interface_p, "get_property", "Property");
     try zw.field(interface_p, "set_property", "Property");
 
@@ -422,7 +427,7 @@ fn genInterfaces(alloc: sphtud.alloc.LinearAllocator, interface_path: [:0]const 
 
     var interfaces = schema_parser.output.iter();
     while (interfaces.next()) |interface| {
-        try genInterface(&reader, interface, p);
+        try genInterface(alloc, &reader, interface, p);
     }
 }
 

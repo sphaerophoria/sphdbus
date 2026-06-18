@@ -213,7 +213,7 @@ fn parseRequestMethod(comptime Method: type, message: dbus.ParsedMessage, requir
     switch (me) {
         inline else => |t| {
             const Args = @FieldType(Method, @tagName(t));
-            if (Args == void) return @unionInit(Method, @tagName(t), {});
+            if (std.meta.fields(Args).len == 0) return @unionInit(Method, @tagName(t), .{});
 
             var br = dbus.BodyReader.initMessage(message, options) catch return error.InvalidBody;
             const arg = br.nextTyped(Args) catch {

@@ -102,7 +102,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
             if (!isMethodSupported(method.*)) {
                 continue;
             }
-
             try f_writer.writer.print(
                 \\    pub const {s}Response = struct {{
                 \\

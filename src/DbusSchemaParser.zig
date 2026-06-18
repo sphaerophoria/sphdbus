@@ -147,6 +147,28 @@ pub const Method = struct {
             .ret = try .init(alloc, expansion_alloc, 100, 1000),
         };
     }
+
+    pub fn retSignature(self: *Method, alloc: std.mem.Allocator) ![]const u8 {
+        return signature(alloc, &self.ret);
+    }
+
+    fn signature(alloc: std.mem.Allocator, args: *sphtud.util.RuntimeSegmentedList(MethodArg)) ![]const u8 {
+        var it = args.iter();
+
+        var len: usize = 0;
+        while (it.next()) |arg| {
+            len += arg.typ.len;
+        }
+
+        var ret = std.ArrayList(u8).initBuffer(try alloc.alloc(u8, len));
+
+        it = args.iter();
+        while (it.next()) |arg| {
+            try ret.appendSliceBounded(arg.typ);
+        }
+
+        return ret.items;
+    }
 };
 
 pub const Interface = struct {

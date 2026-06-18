@@ -58,7 +58,16 @@ pub const SignatureTokenizer = struct {
 
     pub fn peek(self: *SignatureTokenizer) !?Token {
         const b = (try self.peekByte()) orelse return null;
+        return tokenFromChar(b) orelse return makeDbusParseError(
+            self.diagnostics,
+            &self.reader,
+            error.UnhandledSignature,
+            "unhandled type {c}",
+            .{b},
+        );
+    }
 
+    pub fn tokenFromChar(b: u8) ?Token {
         return switch (b) {
             'a' => .array_start,
             '(' => .struct_start,
@@ -76,15 +85,7 @@ pub const SignatureTokenizer = struct {
             'd' => .f64,
             'g' => .signature,
             'y' => .byte,
-            else => {
-                return makeDbusParseError(
-                    self.diagnostics,
-                    &self.reader,
-                    error.UnhandledSignature,
-                    "unhandled type {c}",
-                    .{b},
-                );
-            },
+            else => return null,
         };
     }
 
@@ -493,10 +494,10 @@ const DbusMessageReader = struct {
 pub const ParseArrayUntyped = struct {
     br: BodyReader,
 
-    pub fn next(self: *ParseArrayUntyped) ?*BodyReader {
-        if (!self.br.hasData()) return null;
+    pub fn startNext(self: *ParseArrayUntyped) bool {
+        if (!self.br.hasData()) return false;
         self.br.tokenizer.reader.seek = 0;
-        return &self.br;
+        return true;
     }
 };
 
@@ -841,8 +842,8 @@ test "BodyReader map" {
 
     var i: usize = 0;
 
-    while (arr.next()) |arr_r| {
-        var kv = try arr_r.nextKv();
+    while (arr.startNext()) {
+        var kv = try arr.br.nextKv();
 
         const key = try kv.nextI32();
         try std.testing.expectEqual(@as(i32, @intCast(i * 2)), key);
@@ -1510,6 +1511,52 @@ test "invalid array len crash" {
     try std.testing.expectError(error.ParseError, br.nextTyped(ParseArray(u32)));
 }
 
+test "array of array" {
+    var body_buf: [4096]u8 = undefined;
+    var body: BodySerializer = undefined;
+    body.initPinned(&body_buf, "aa(iu)");
+
+    try body.startArray();
+    for (0..2) |i| {
+        try body.startArrayElem();
+
+        try body.startArray();
+        for (0..i) |j| {
+            try body.startArrayElem();
+
+            try body.startStruct();
+            try body.addI32(@intCast(i));
+            try body.addU32(@intCast(j));
+            try body.endStruct();
+        }
+        try body.endArray();
+    }
+    try body.endArray();
+
+    const f = try sphtud.io.open("dump.bin", .{ .ACCMODE = .WRONLY, .TRUNC = true, .CREAT = true }, 0o664);
+    try sphtud.io.writeAll(body.writer.buffered(), f);
+
+    var br = BodyReader.init(body.type_string, body.writer.buffered(), .little, .{});
+
+    var outer = try br.nextArray();
+    try std.testing.expectEqual(true, outer.startNext());
+
+    var inner = try outer.br.nextArray();
+    try std.testing.expectEqual(false, inner.startNext());
+
+    try std.testing.expectEqual(true, outer.startNext());
+
+    inner = try outer.br.nextArray();
+    try std.testing.expectEqual(true, inner.startNext());
+
+    var s = try inner.br.nextStruct();
+    try std.testing.expectEqual(1, s.nextI32());
+    try std.testing.expectEqual(0, s.nextU32());
+    try std.testing.expectEqual(null, s.next());
+
+    try std.testing.expectEqual(false, outer.startNext());
+}
+
 pub const ParseError = error{ParseError} || std.Io.Reader.Error;
 pub const SerializeError = error{SerializeError} || std.Io.Writer.Error;
 
@@ -1781,18 +1828,7 @@ pub const BodySerializer = struct {
 
     fn commonStart(self: *BodySerializer, t: DbusType) !void {
         try self.addTypeString(t.typeString());
-
-        if (self.getArrStackEnd()) |a| {
-            if (a.data_start == null) {
-                // If we are the first array element, ensure we are aligned
-                // correctly and mark where the first element started for the
-                // length calculation later
-                try self.body.alignForwards(alignmentOf(t));
-                a.data_start = self.writer.end;
-            }
-        } else {
-            try self.body.alignForwards(alignmentOf(t));
-        }
+        try self.body.alignForwards(alignmentOf(t));
     }
 
     pub fn startArray(self: *BodySerializer) !void {
@@ -1800,25 +1836,17 @@ pub const BodySerializer = struct {
 
         const size_ptr = try self.stubArrayLength();
 
-        var new_arr_stack = ArrStackItem{
+        const token = SignatureTokenizer.tokenFromChar(
+            self.peekTypeChar() orelse return error.SerializeError,
+        );
+        const dbus_type = try DbusType.fromToken(token orelse return error.SerializeError);
+        try self.body.alignForwards(alignmentOf(dbus_type));
+
+        try self.arr_stack.appendBounded(.{
             .size = size_ptr,
-            .data_start = null,
+            .data_start = self.writer.end,
             .type_start = self.type_string_compare_cursor,
-        };
-
-        if (self.arr_stack.getLastOrNull()) |data| {
-            // If we are on the second element of an array, we are no
-            // longer filling in the type info. If we have nested arrays we
-            // need to respect that we are in the second iteration of some
-            // array, even if we are in the first iteration of our own.
-            // Here the type start/type_string_compare_cursor are no longer
-            // just at the end, but where we inserted the type data last time
-
-            self.type_string_compare_cursor = data.type_start;
-            new_arr_stack.type_start = self.type_string_compare_cursor + 1;
-        }
-
-        try self.arr_stack.appendBounded(new_arr_stack);
+        });
     }
 
     fn stubArrayLength(self: *BodySerializer) !*[4]u8 {
@@ -1829,7 +1857,8 @@ pub const BodySerializer = struct {
 
     pub fn endArray(self: *BodySerializer) !void {
         const data = self.arr_stack.pop() orelse return error.NoArray;
-        const size_u32 = std.math.cast(u32, self.writer.end - data.data_start.?) orelse return error.ArrayTooLong;
+        const data_start = data.data_start orelse self.writer.end;
+        const size_u32 = std.math.cast(u32, self.writer.end - data_start) orelse return error.ArrayTooLong;
         @memcpy(data.size, std.mem.asBytes(&size_u32));
     }
 
@@ -1850,9 +1879,14 @@ pub const BodySerializer = struct {
         // touch type_string or the array comparison cursor at all.
         if (self.variant_depth > 0) return;
 
-        if (self.type_string_compare_cursor >= self.type_string.len) return error.SerializeError;
-        if (self.type_string[self.type_string_compare_cursor] != val) return error.SerializeError;
+        const type_char = self.peekTypeChar() orelse return error.SerializeError;
+        if (type_char != val) return error.SerializeError;
         self.type_string_compare_cursor += 1;
+    }
+
+    fn peekTypeChar(self: *BodySerializer) ?u8 {
+        if (self.type_string_compare_cursor >= self.type_string.len) return null;
+        return self.type_string[self.type_string_compare_cursor];
     }
 
     test "single string" {
@@ -1921,6 +1955,18 @@ pub const BodySerializer = struct {
         body.initPinned(&body_buf, "");
 
         try std.testing.expectError(error.NoArray, body.endArray());
+    }
+
+    test "empty array" {
+        var body_buf: [4096]u8 = undefined;
+        var body: BodySerializer = undefined;
+        body.initPinned(&body_buf, "a{sv}");
+
+        try body.startArray();
+        try body.endArray();
+
+        // 4 bytes for array size of 0, 4 bytes to align to the start of the struct
+        try std.testing.expectEqualSlices(u8, body.writer.buffered(), &.{ 0, 0, 0, 0, 0, 0, 0, 0 });
     }
 };
 
@@ -2153,8 +2199,8 @@ pub fn ParseArray(comptime Val: type) type {
         inner: ParseArrayUntyped,
 
         pub fn next(self: *@This()) !?Val {
-            var elem = self.inner.next() orelse return null;
-            return try elem.nextTyped(Val);
+            if (!self.inner.startNext()) return null;
+            return try self.inner.br.nextTyped(Val);
         }
     };
 }

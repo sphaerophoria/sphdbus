@@ -2070,7 +2070,16 @@ pub const DbusConnection = struct {
             const reader_buf = self.reader.buffered();
 
             const message = ParsedMessage.parse(reader_buf, options.diagnostics) catch |e| switch (e) {
-                error.EndOfStream => return .none,
+                // Buffer does not hold enough data, try to get some
+                // more, unless we have no more buffer space available
+                error.EndOfStream => {
+                    if (self.reader.end == self.reader.buffer.len and self.reader.seek == 0) {
+                        return error.Unrecoverable;
+                    }
+
+                    try self.reader.fillMore();
+                    continue;
+                },
                 // A header parse error will never resolve, and we have no way
                 // to know how much data to consume if we cannot read the
                 // header correctly. We need a full connection reset

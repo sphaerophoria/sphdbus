@@ -1533,9 +1533,6 @@ test "array of array" {
     }
     try body.endArray();
 
-    const f = try sphtud.io.open("dump.bin", .{ .ACCMODE = .WRONLY, .TRUNC = true, .CREAT = true }, 0o664);
-    try sphtud.io.writeAll(body.writer.buffered(), f);
-
     var br = BodyReader.init(body.type_string, body.writer.buffered(), .little, .{});
 
     var outer = try br.nextArray();
@@ -1665,7 +1662,13 @@ fn makeDbusParseError(diagnostics: ?*DbusErrorDiagnostics, reader: *std.Io.Reade
     return error.ParseError;
 }
 
-pub const CallHandle = struct { inner: u32 };
+pub const CallHandle = struct {
+    inner: u32,
+
+    pub fn eql(self: CallHandle, other: CallHandle) bool {
+        return self.inner == other.inner;
+    }
+};
 
 pub const BodySerializer = struct {
     writer: std.Io.Writer,

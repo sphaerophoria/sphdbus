@@ -191,8 +191,17 @@ pub fn main(init: std.process.Init.Minimal) !void {
             });
 
             if (method.ret.len > 0) {
-                // Unimplemented, see parseGetPropertyResponse below
-                unreachable;
+                try f_writer.writer.print(
+                    \\            pub fn @"parse{[name]s}Response"(
+                    \\                message: dbus.ParsedMessage,
+                    \\                options: dbus.ParseOptions,
+                    \\            ) !{[name]s}Response {{
+                    \\                var br = try dbus.BodyReader.initMessage(message, options);
+                    \\                return try br.nextTyped({[name]s}Response);
+                    \\            }}
+                , .{
+                    .name = method.name,
+                });
             }
         }
 

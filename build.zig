@@ -7,6 +7,15 @@ pub fn genService(b: *std.Build, me: *std.Build.Dependency, path: std.Build.Lazy
     return runGenService(b, gen_service, sphdbus_mod, path);
 }
 
+pub fn genClient(b: *std.Build, me: *std.Build.Dependency, path: std.Build.LazyPath) *std.Build.Module {
+    var cg = ClientGenerator{
+        .b = b,
+        .exe = me.artifact("generate"),
+        .dbus = me.module("sphdbus"),
+    };
+    return cg.genClientMod(path);
+}
+
 fn runGenService(b: *std.Build, exe: *std.Build.Step.Compile, sphdbus: *std.Build.Module, path: std.Build.LazyPath) *std.Build.Module {
     const run_gen_service = b.addRunArtifact(exe);
     run_gen_service.addFileArg(path);
